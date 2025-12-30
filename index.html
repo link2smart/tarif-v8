@@ -3,15 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Portail Tarifs CMGP-CAS (Dropbox Sync)</title>
-    <!-- Bibliothèques React & UI -->
+    <title>TarifiersDBX-V1</title>
+    <!-- React & UI -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
-    
-    <!-- Moteurs PDF -->
+    <!-- PDF Engine -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 
     <style>
@@ -20,15 +19,16 @@
         .animate-fade { animation: fadeIn 0.4s ease-out; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
         .hide-scroll::-webkit-scrollbar { display: none; }
+        .glass { background: rgba(255, 255, 255, 0.9); backdrop-filter: blur(10px); }
     </style>
 </head>
-<body class="bg-slate-50">
+<body class="bg-slate-50 text-slate-900">
     <div id="root"></div>
 
     <script type="text/babel">
         const { useState, useEffect, useMemo, useRef } = React;
 
-        // Configuration PDF.js worker
+        // Configuration PDF.js
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
         // --- SERVICES DROPBOX ---
@@ -39,7 +39,7 @@
             const res = await fetch(`${DROPBOX_API_URL}/files/list_folder`, {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ path: path === '/' ? '' : path, recursive: false, include_media_info: false })
+                body: JSON.stringify({ path: path === '/' ? '' : path, recursive: false })
             });
             if (!res.ok) throw new Error(await res.text());
             return await res.json();
@@ -54,510 +54,582 @@
             return await res.blob();
         };
 
-        // Fonction d'attente pour éviter de saturer l'IA
+        const dbxUploadFile = async (token, path, content) => {
+            const res = await fetch(`${DROPBOX_CONTENT_URL}/files/upload`, {
+                method: 'POST',
+                headers: { 
+                    'Authorization': `Bearer ${token}`, 
+                    'Dropbox-API-Arg': JSON.stringify({ path, mode: 'overwrite', mute: true }),
+                    'Content-Type': 'application/octet-stream'
+                },
+                body: content
+            });
+            if (!res.ok) {
+                const errText = await res.text();
+                if(errText.includes("files.content.write")) throw new Error("Permission Dropbox manquante : 'files.content.write' requise pour publier.");
+                throw new Error("Erreur Upload: " + errText);
+            }
+            return await res.json();
+        };
+
         const delay = ms => new Promise(res => setTimeout(res, ms));
 
         // --- IA GOOGLE ---
-        const apiKeyIA = "AIzaSyC6-bG7HPhBnjmctpJPPYI29OSiM_S4JFg"; 
-        
-        const callIA = async (payload) => {
+        const callIA = async (payload, key, retryCount = 0) => {
+            const modelVersion = 'gemini-2.5-flash-preview-09-2025';
+            if (!key) throw new Error("Clé API Gemini manquante");
+
             try {
-                const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKeyIA}`, {
+                const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelVersion}:generateContent?key=${key}`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
                 });
                 
+                if (res.status === 429) {
+                    if (retryCount < 3) {
+                        const waitTime = 2000 * Math.pow(2, retryCount);
+                        console.warn(`⚠️ Quota IA (429). Pause de ${waitTime/1000}s...`);
+                        await delay(waitTime);
+                        return callIA(payload, key, retryCount + 1);
+                    }
+                    throw new Error("Quota IA épuisé (429).");
+                }
                 if (!res.ok) {
                     const errorData = await res.json();
-                    throw new Error(errorData.error?.message || `Erreur HTTP ${res.status}`);
+                    throw new Error(errorData.error?.message || `Erreur IA HTTP ${res.status}`);
                 }
-                
                 return await res.json();
-            } catch (e) {
-                // On relance l'erreur pour qu'elle soit capturée par le log de sync
-                throw e;
-            }
+            } catch (e) { throw e; }
         };
 
-        const Icon = ({ name, size = 20, className = "" }) => {
+        // --- UTILITAIRES ---
+        const extractJSON = (text) => {
+            const firstBrace = text.indexOf('{');
+            const lastBrace = text.lastIndexOf('}');
+            if (firstBrace !== -1 && lastBrace !== -1) return text.substring(firstBrace, lastBrace + 1);
+            return text;
+        };
+
+        const extractDateFromFilename = (filename) => {
+            // Supporte "du 01-10-25", "01.10.2025", "2025-10-01" etc.
+            const regex = /(\d{1,2})[-._/](\d{1,2})[-._/](\d{2,4})/;
+            const match = filename.match(regex);
+            if (match) {
+                let day = match[1].padStart(2, '0');
+                let month = match[2].padStart(2, '0');
+                let year = match[3];
+                if (year.length === 2) year = '20' + year;
+                return `${day}/${month}/${year}`;
+            }
+            return null;
+        };
+
+        const Icon = ({ name, size = 18, className = "" }) => {
             const iconRef = useRef(null);
             useEffect(() => {
                 if (window.lucide && iconRef.current) {
+                    const kebabName = name.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+                    iconRef.current.innerHTML = `<i data-lucide="${kebabName}"></i>`;
                     window.lucide.createIcons({ root: iconRef.current, attrs: { width: size, height: size, class: className } });
-                    iconRef.current.innerHTML = `<i data-lucide="${name.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase()}"></i>`;
                 }
             }, [name, size, className]);
             return <span ref={iconRef} className="inline-flex items-center justify-center" />;
         };
 
+        // --- APPLICATION ---
         function App() {
-            // --- ETATS ---
-            const [view, setView] = useState('login'); 
-            const [adminTab, setAdminTab] = useState('sync'); 
-            const [searchTab, setSearchTab] = useState('tarifs'); 
-            
-            // Flag de sécurité pour le chargement des données
-            const [isDataLoaded, setIsDataLoaded] = useState(false);
-
-            const [tarifs, setTarifs] = useState([]);
-            const [fichesTechniques, setFichesTechniques] = useState([]);
-            const [syncInfo, setSyncInfo] = useState({ lastSync: null, recentFiles: [] });
-            
-            const [dbxConfig, setDbxConfig] = useState({ 
-                token: '', 
-                pathTarifs: '/Tarifs', 
-                pathFT: '/Fiches' 
-            });
-
-            const [queryStr, setQueryStr] = useState('');
-            const [ftQueryStr, setFtQueryStr] = useState('');
+            // AUTH & CONFIG
+            const [users, setUsers] = useState([
+                { id: 'admin', pass: 'admin', role: 'admin', name: 'Administrateur' },
+                { id: 'collab', pass: '1234', role: 'viewer', name: 'Collaborateur' }
+            ]);
+            const [currentUser, setCurrentUser] = useState(null);
             const [loginForm, setLoginForm] = useState({ username: '', password: '' });
             const [loginError, setLoginError] = useState('');
-            const [syncStatus, setSyncStatus] = useState(null); 
+
+            // DATA
+            const [tarifs, setTarifs] = useState([]);
+            const [dbxConfig, setDbxConfig] = useState({ token: '', pathTarifs: '/Tarifs', geminiKey: '' });
+            
+            // UI
+            const [view, setView] = useState('login'); 
+            const [activeTab, setActiveTab] = useState('search'); 
+            const [searchQuery, setSearchQuery] = useState('');
             const [syncLog, setSyncLog] = useState('');
-            const fileInputRef = useRef(null); 
+            const [syncStatus, setSyncStatus] = useState('idle'); // idle, working, success, error
+            const [showConfigModal, setShowConfigModal] = useState(false); // Pour le collaborateur sans token
 
-            // --- CHARGEMENT PERSISTANCE (PRIORITAIRE) ---
+            // INIT & PERSISTENCE
             useEffect(() => {
-                try {
-                    const savedTarifs = localStorage.getItem('cmgp_dbx_tarifs');
-                    const savedFT = localStorage.getItem('cmgp_dbx_ft');
-                    const savedConfig = localStorage.getItem('cmgp_dbx_config');
-                    const savedSync = localStorage.getItem('cmgp_dbx_sync_info');
+                const storedConfig = localStorage.getItem('tdbx_config');
+                const storedUsers = localStorage.getItem('tdbx_users');
+                const storedTarifs = localStorage.getItem('tdbx_tarifs'); 
 
-                    if (savedTarifs) setTarifs(JSON.parse(savedTarifs));
-                    if (savedFT) setFichesTechniques(JSON.parse(savedFT));
-                    if (savedConfig) setDbxConfig(JSON.parse(savedConfig));
-                    if (savedSync) setSyncInfo(JSON.parse(savedSync));
-                } catch(e) {
-                    console.error("Erreur chargement localStorage", e);
-                } finally {
-                    // C'est la clé : on signale que le chargement est FINI
-                    setIsDataLoaded(true);
-                }
+                if (storedConfig) setDbxConfig(JSON.parse(storedConfig));
+                if (storedUsers) setUsers(JSON.parse(storedUsers));
+                if (storedTarifs) setTarifs(JSON.parse(storedTarifs));
             }, []);
 
-            // --- SAUVEGARDE AUTO (PROTÉGÉE) ---
-            // Ne sauvegarde QUE si les données ont été chargées au moins une fois
-            useEffect(() => { 
-                if (isDataLoaded) localStorage.setItem('cmgp_dbx_tarifs', JSON.stringify(tarifs)); 
-            }, [tarifs, isDataLoaded]);
+            useEffect(() => { if(currentUser) localStorage.setItem('tdbx_config', JSON.stringify(dbxConfig)); }, [dbxConfig, currentUser]);
+            useEffect(() => { if(currentUser) localStorage.setItem('tdbx_users', JSON.stringify(users)); }, [users, currentUser]);
+            useEffect(() => { if(currentUser) localStorage.setItem('tdbx_tarifs', JSON.stringify(tarifs)); }, [tarifs, currentUser]);
 
-            useEffect(() => { 
-                if (isDataLoaded) localStorage.setItem('cmgp_dbx_ft', JSON.stringify(fichesTechniques)); 
-            }, [fichesTechniques, isDataLoaded]);
-
-            useEffect(() => { 
-                if (isDataLoaded) localStorage.setItem('cmgp_dbx_config', JSON.stringify(dbxConfig)); 
-            }, [dbxConfig, isDataLoaded]);
-
-            useEffect(() => { 
-                if (isDataLoaded) localStorage.setItem('cmgp_dbx_sync_info', JSON.stringify(syncInfo)); 
-            }, [syncInfo, isDataLoaded]);
-
-            // --- FONCTIONS SAUVEGARDE / RESTAURATION MANUELLE ---
-            const handleExportConfig = () => {
-                const data = { tarifs, fichesTechniques, dbxConfig, syncInfo, exportDate: new Date().toISOString() };
-                const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url; a.download = `cmgp_config_backup_${new Date().toISOString().slice(0,10)}.json`;
-                document.body.appendChild(a); a.click(); document.body.removeChild(a);
-            };
-
-            const handleImportConfig = (event) => {
-                const file = event.target.files[0];
-                if (!file) return;
-                const reader = new FileReader();
-                reader.onload = (e) => {
-                    try {
-                        const data = JSON.parse(e.target.result);
-                        // On met à jour les données et on force le flag isLoaded pour permettre la sauvegarde immédiate
-                        if (data.tarifs) setTarifs(data.tarifs);
-                        if (data.fichesTechniques) setFichesTechniques(data.fichesTechniques);
-                        if (data.dbxConfig) setDbxConfig(data.dbxConfig);
-                        if (data.syncInfo) setSyncInfo(data.syncInfo);
-                        setIsDataLoaded(true); 
-                        alert("Configuration restaurée !");
-                    } catch (error) { alert("Fichier invalide."); }
-                };
-                reader.readAsText(file);
-            };
-
-            // --- NETTOYAGE JSON ROBUSTE ---
-            const extractJSON = (text) => {
-                const firstBrace = text.indexOf('{');
-                const lastBrace = text.lastIndexOf('}');
-                if (firstBrace !== -1 && lastBrace !== -1) {
-                    return text.substring(firstBrace, lastBrace + 1);
-                }
-                return text;
-            };
-
-            // --- LOGIQUE METIER IA & PARSING ---
-            const analyzeTarifPDF = async (blob) => {
-                try {
-                    const arrayBuffer = await blob.arrayBuffer();
-                    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-                    let allProducts = [];
-                    
-                    for (let i = 1; i <= Math.min(pdf.numPages, 2); i++) {
-                        const page = await pdf.getPage(i);
-                        const viewport = page.getViewport({ scale: 1.5 });
-                        const canvas = document.createElement('canvas');
-                        const ctx = canvas.getContext('2d');
-                        canvas.height = viewport.height;
-                        canvas.width = viewport.width;
-                        await page.render({ canvasContext: ctx, viewport }).promise;
-                        
-                        // Appel IA
-                        const result = await callIA({
-                            contents: [{ parts: [{ text: "Extrais la liste des produits sous forme d'un objet JSON strict. Structure: { \"products\": [ { \"name\": \"Nom complet du produit\", \"price\": \"Prix numérique (ex: 120.50)\", \"packaging\": \"Unité (ex: 25 KG)\" } ] }. Ne mets RIEN d'autre que le JSON." }, { inlineData: { mimeType: "image/png", data: canvas.toDataURL('image/png').split(',')[1] } } ] }],
-                            generationConfig: { responseMimeType: "application/json" }
-                        });
-                        
-                        if (result.candidates && result.candidates[0].content) {
-                            const rawText = result.candidates[0].content.parts[0].text;
-                            const cleanJson = extractJSON(rawText);
-                            try {
-                                const data = JSON.parse(cleanJson);
-                                if (data.products && Array.isArray(data.products)) {
-                                    const cleanProducts = data.products.map(p => ({
-                                        ...p,
-                                        price: p.price ? String(p.price).replace(',', '.').replace(/[^0-9.]/g, '') : '0'
-                                    }));
-                                    allProducts.push(...cleanProducts);
-                                }
-                            } catch(jsonErr) {
-                                console.warn("Erreur Parsing JSON IA:", jsonErr);
-                            }
-                        }
-                    }
-                    return allProducts;
-                } catch (e) {
-                    throw e; 
-                }
-            };
-
-            const analyzeFTName = async (blob, filename) => {
-                return filename.replace(/\.pdf$/i, '').replace(/_/g, ' ');
-            };
-
-            // --- MOTEUR DE SYNC DROPBOX ---
-            const runSync = async (forceRescan = false) => {
-                if (!dbxConfig.token) return alert("Configurez le Token Dropbox d'abord.");
-                
-                setSyncStatus('loading');
-                setSyncLog(forceRescan ? 'Re-scan COMPLET forcé...' : 'Démarrage synchronisation...');
-                
-                let localTarifs = forceRescan ? [] : [...tarifs];
-                let updatesCount = 0;
-                const newRecentFiles = [];
-
-                try {
-                    // 1. SYNC TARIFS
-                    setSyncLog(`>>> Analyse Tarifs (${dbxConfig.pathTarifs})`);
-                    try {
-                        const listTarifs = await dbxListFolder(dbxConfig.token, dbxConfig.pathTarifs);
-                        const validEntryIds = [];
-
-                        for (const entry of listTarifs.entries) {
-                            if (entry['.tag'] !== 'file' || !entry.name.toLowerCase().endsWith('.pdf')) continue;
-                            
-                            validEntryIds.push(entry.id);
-                            const existing = localTarifs.find(t => t.id === entry.id);
-
-                            const needsUpdate = forceRescan || !existing || existing.server_modified !== entry.server_modified || (!existing.products || existing.products.length === 0);
-
-                            if (needsUpdate) {
-                                setSyncLog(`Traitement IA : ${entry.name}...`);
-                                try {
-                                    const blob = await dbxDownloadFile(dbxConfig.token, entry.path_lower);
-                                    await delay(1500); 
-                                    const products = await analyzeTarifPDF(blob);
-                                    
-                                    if (products.length === 0) {
-                                        setSyncLog(`⚠️ ${entry.name} : 0 produits. (Recherche par nom fichier uniquement)`);
-                                    } else {
-                                        setSyncLog(`✅ ${entry.name} : ${products.length} produits extraits.`);
-                                    }
-
-                                    const newDoc = {
-                                        id: entry.id,
-                                        name: entry.name,
-                                        path: entry.path_lower,
-                                        server_modified: entry.server_modified,
-                                        products: products,
-                                        type: 'tarif'
-                                    };
-                                    
-                                    // Mise à jour state pour affichage temps réel
-                                    setTarifs(prev => {
-                                        const filtered = prev.filter(p => p.id !== entry.id);
-                                        return [...filtered, newDoc];
-                                    });
-                                    // Mise à jour var locale pour la suite
-                                    localTarifs = [...localTarifs.filter(p => p.id !== entry.id), newDoc];
-
-                                    newRecentFiles.push({ name: entry.name, type: 'tarif', date: new Date().toLocaleTimeString() });
-                                    updatesCount++;
-
-                                } catch (fileError) {
-                                    setSyncLog(`❌ Erreur fichier ${entry.name} : ${fileError.message}`);
-                                }
-                            }
-                        }
-                        
-                        if(!forceRescan) {
-                             const cleaned = localTarifs.filter(t => validEntryIds.includes(t.id));
-                             setTarifs(cleaned);
-                        }
-
-                    } catch (e) {
-                        setSyncLog(`Erreur dossier Tarifs: ${e.message}`);
-                    }
-
-                    // 2. SYNC FICHES
-                    setSyncLog(`>>> Analyse Fiches (${dbxConfig.pathFT})`);
-                    try {
-                        const listFT = await dbxListFolder(dbxConfig.token, dbxConfig.pathFT);
-                        const validFTIds = [];
-
-                        for (const entry of listFT.entries) {
-                            if (entry['.tag'] !== 'file') continue;
-                            validFTIds.push(entry.id);
-                            
-                            const existing = fichesTechniques.find(f => f.id === entry.id);
-                            if (forceRescan || !existing || existing.server_modified !== entry.server_modified) {
-                                const productName = await analyzeFTName(null, entry.name);
-                                const newDoc = {
-                                    id: entry.id,
-                                    fileName: entry.name,
-                                    productName: productName,
-                                    path: entry.path_lower,
-                                    server_modified: entry.server_modified,
-                                    type: 'ft'
-                                };
-                                setFichesTechniques(prev => [...prev.filter(f => f.id !== entry.id), newDoc]);
-                                updatesCount++;
-                            }
-                        }
-                        if(!forceRescan) setFichesTechniques(prev => prev.filter(f => validFTIds.includes(f.id)));
-
-                    } catch (e) {
-                        setSyncLog(`Erreur dossier Fiches: ${e.message}`);
-                    }
-
-                    setSyncInfo({
-                        lastSync: new Date().toLocaleString(),
-                        recentFiles: [...newRecentFiles, ...syncInfo.recentFiles].slice(0, 10)
-                    });
-                    setSyncStatus('success');
-                    setSyncLog(`Terminé ! ${updatesCount} mises à jour.`);
-
-                } catch (globalError) {
-                    setSyncStatus('error');
-                    setSyncLog("Erreur critique : " + globalError.message);
-                }
-            };
-
-            const openDropboxFile = async (path) => {
-                if (!dbxConfig.token) return alert("Token manquant");
-                try {
-                    const res = await fetch(`${DROPBOX_API_URL}/files/get_temporary_link`, {
-                        method: 'POST',
-                        headers: { 'Authorization': `Bearer ${dbxConfig.token}`, 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ path: path })
-                    });
-                    const data = await res.json();
-                    if (data.link) window.open(data.link, '_blank');
-                    else alert("Impossible de générer le lien.");
-                } catch (e) {
-                    alert("Erreur ouverture fichier.");
-                }
-            };
+            // --- LOGIQUE MÉTIER ---
 
             const handleLogin = (e) => {
                 e.preventDefault();
-                if (loginForm.username.toLowerCase() === 'admin' && loginForm.password === 'admin') {
-                    setView('search');
+                const user = users.find(u => u.id === loginForm.username && u.pass === loginForm.password);
+                
+                if (user) {
+                    setCurrentUser(user);
+                    setLoginError('');
+                    
+                    if (user.role === 'viewer') {
+                        // Si collaborateur SANS token, on montre la config
+                        if (!dbxConfig.token) {
+                            setShowConfigModal(true);
+                            setView('dashboard');
+                        } else {
+                            // Si collaborateur AVEC token, on charge la DB
+                            setView('dashboard');
+                            loadCloudDatabase();
+                        }
+                    } else {
+                        // Admin
+                        setView('dashboard');
+                    }
                 } else {
-                    setLoginError('Identifiants incorrects (admin/admin)');
+                    setLoginError('Identifiants incorrects');
                 }
             };
 
-            // --- RECHERCHE (HYBRIDE) ---
-            const searchResults = useMemo(() => {
-                if (queryStr.length < 2) return [];
-                const res = [];
-                const searchLower = queryStr.toLowerCase();
+            // Analyse IA d'un PDF
+            const analyzePDF = async (blob, filename) => {
+                try {
+                    const arrayBuffer = await blob.arrayBuffer();
+                    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+                    
+                    const page = await pdf.getPage(1);
+                    const viewport = page.getViewport({ scale: 1.5 });
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+                    canvas.height = viewport.height;
+                    canvas.width = viewport.width;
+                    await page.render({ canvasContext: ctx, viewport }).promise;
+                    
+                    const base64Img = canvas.toDataURL('image/png').split(',')[1];
+                    const filenameDate = extractDateFromFilename(filename);
 
-                tarifs.forEach(t => {
-                    // 1. Recherche dans les produits extraits
-                    if (t.products && t.products.length > 0) {
-                        t.products.forEach(p => {
-                            const pName = p.name ? String(p.name).toLowerCase() : "";
-                            const pPack = p.packaging ? String(p.packaging).toLowerCase() : "";
+                    const prompt = `Analyse cette page de tarif.
+                    1. Cherche EXPLICITEMENT la date d'application (ex: "Janvier 2024", "01/10/25"). Si trouvée, formate-la en JJ/MM/AAAA.
+                    2. Si AUCUNE date n'est visible dans le document, utilise la date du nom de fichier : "${filenameDate || 'Non daté'}".
+                    3. Extrais les produits sous format JSON : { "date_tarif": "JJ/MM/AAAA", "products": [ {"name": "Nom produit", "price": "123.00", "unit": "KG"} ] }.
+                    Renvoie UNIQUEMENT le JSON.`;
+
+                    const result = await callIA({
+                        contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: "image/png", data: base64Img } } ] }],
+                        generationConfig: { responseMimeType: "application/json" }
+                    }, dbxConfig.geminiKey);
+
+                    const cleanJson = extractJSON(result.candidates[0].content.parts[0].text);
+                    const data = JSON.parse(cleanJson);
+                    
+                    return {
+                        date_tarif: data.date_tarif || filenameDate || "Date inconnue",
+                        products: data.products || []
+                    };
+                } catch (e) {
+                    console.error("Erreur Analyse PDF:", e);
+                    return { date_tarif: extractDateFromFilename(filename) || "Erreur", products: [] };
+                }
+            };
+
+            // ADMIN : Scan et Publication
+            const runFullSync = async (forceAll = false) => {
+                if (currentUser.role !== 'admin') return;
+                if (!dbxConfig.token || !dbxConfig.geminiKey) return alert("Configuration manquante (Token Dropbox ou Clé Gemini).");
+
+                setSyncStatus('working');
+                setSyncLog("🔍 Scan Dropbox en cours...");
+                
+                try {
+                    const list = await dbxListFolder(dbxConfig.token, dbxConfig.pathTarifs);
+                    const dbxFiles = list.entries.filter(e => e['.tag'] === 'file' && e.name.toLowerCase().endsWith('.pdf'));
+
+                    let newTarifs = [...tarifs];
+                    // Nettoyage des fichiers supprimés
+                    newTarifs = newTarifs.filter(t => dbxFiles.find(df => df.id === t.id));
+
+                    let processed = 0;
+
+                    for (const file of dbxFiles) {
+                        const existing = newTarifs.find(t => t.id === file.id);
+                        const needsUpdate = forceAll || !existing || existing.server_modified !== file.server_modified;
+
+                        if (needsUpdate) {
+                            setSyncLog(`📄 Traitement IA : ${file.name}...`);
+                            const blob = await dbxDownloadFile(dbxConfig.token, file.path_lower);
+                            await delay(1000); // Pause anti-quota
                             
-                            if (pName.includes(searchLower) || pPack.includes(searchLower)) {
-                                res.push({ ...p, source: t.name, path: t.path, sourceId: t.id, type: 'product' });
+                            const analysis = await analyzePDF(blob, file.name);
+
+                            if (analysis.products.length === 0) setSyncLog(`⚠️ 0 produits trouvés pour ${file.name}`);
+
+                            const docEntry = {
+                                id: file.id,
+                                name: file.name,
+                                path: file.path_lower,
+                                server_modified: file.server_modified,
+                                index_date: new Date().toLocaleString(),
+                                date_tarif: analysis.date_tarif, // Date extraite
+                                products: analysis.products
+                            };
+
+                            newTarifs = newTarifs.filter(t => t.id !== file.id);
+                            newTarifs.push(docEntry);
+                            processed++;
+                        }
+                    }
+
+                    setTarifs(newTarifs);
+                    
+                    // Publication Automatique après Scan
+                    setSyncLog(`✅ Scan terminé (${processed} MAJ). Publication sur le Cloud...`);
+                    await saveCloudDatabase(newTarifs);
+                    setSyncStatus('success');
+
+                } catch (err) {
+                    setSyncLog(`❌ Erreur : ${err.message}`);
+                    setSyncStatus('error');
+                }
+            };
+
+            // ADMIN : UPLOAD db_tarifs.json
+            const saveCloudDatabase = async (data) => {
+                try {
+                    const jsonBlob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+                    await dbxUploadFile(dbxConfig.token, '/db_tarifs.json', jsonBlob);
+                    setSyncLog(prev => prev + "\n☁️ Base de données publiée avec succès ! Les collaborateurs sont à jour.");
+                } catch (e) {
+                    setSyncLog(prev => prev + `\n⚠️ Erreur Publication Cloud : ${e.message}`);
+                    throw e;
+                }
+            };
+
+            // COLLABORATEUR : DOWNLOAD db_tarifs.json
+            const loadCloudDatabase = async () => {
+                if (!dbxConfig.token) return;
+                setSyncStatus('working');
+                setSyncLog("⬇️ Téléchargement des dernières données...");
+                try {
+                    const blob = await dbxDownloadFile(dbxConfig.token, '/db_tarifs.json');
+                    const text = await blob.text();
+                    const data = JSON.parse(text);
+                    setTarifs(data);
+                    setSyncLog(`✅ Données chargées : ${data.length} catalogues récupérés.`);
+                    setSyncStatus('success');
+                } catch (e) {
+                    setSyncLog(`❌ Impossible de charger les données : ${e.message}`);
+                    setSyncStatus('error');
+                }
+            };
+
+            // --- RENDER ---
+            
+            // Calcul des résultats de recherche
+            const searchResults = useMemo(() => {
+                if (!searchQuery || searchQuery.length < 2) return [];
+                const q = searchQuery.toLowerCase();
+                const res = [];
+                
+                tarifs.forEach(t => {
+                    // Match Produits
+                    if (t.products) {
+                        t.products.forEach(p => {
+                            if (p.name?.toLowerCase().includes(q)) {
+                                res.push({ ...p, source: t.name, date_tarif: t.date_tarif, path: t.path, type: 'prod' });
                             }
                         });
                     }
-
-                    // 2. Recherche de secours sur le nom du fichier
-                    if (t.name.toLowerCase().includes(searchLower)) {
-                        res.push({
-                            name: "📂 " + t.name, 
-                            price: "---",
-                            packaging: "Catalogue PDF",
-                            source: "Fichier Complet",
-                            path: t.path,
-                            sourceId: t.id,
-                            type: 'file'
-                        });
+                    // Match Fichier
+                    if (t.name.toLowerCase().includes(q)) {
+                        res.push({ name: "Fichier Complet", price: "---", unit: "PDF", source: t.name, date_tarif: t.date_tarif, path: t.path, type: 'file' });
                     }
                 });
                 return res;
-            }, [queryStr, tarifs]);
+            }, [searchQuery, tarifs]);
 
-            const ftSearchResults = useMemo(() => {
-                if (ftQueryStr.length < 2) return [];
-                return fichesTechniques.filter(ft => 
-                    (ft.productName && ft.productName.toLowerCase().includes(ftQueryStr.toLowerCase())) || 
-                    (ft.fileName && ft.fileName.toLowerCase().includes(ftQueryStr.toLowerCase()))
-                );
-            }, [ftQueryStr, fichesTechniques]);
+            const totalProducts = tarifs.reduce((acc, t) => acc + (t.products?.length || 0), 0);
 
-            // Stats
-            const totalProductsIndexed = useMemo(() => tarifs.reduce((acc, t) => acc + (t.products ? t.products.length : 0), 0), [tarifs]);
-
+            // Vue Login
             if (view === 'login') return (
-                <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-blue-50 to-slate-100">
-                    <div className="max-w-sm w-full bg-white rounded-3xl shadow-xl overflow-hidden border border-slate-100 animate-fade">
-                        <div className="bg-blue-600 p-8 text-center text-white">
-                            <div className="flex justify-center mb-4"><div className="bg-white/20 p-3 rounded-xl"><Icon name="Box" size={32} className="text-white"/></div></div>
-                            <h1 className="text-2xl font-black tracking-tight">CMGP-CAS</h1>
-                            <p className="text-blue-100 text-xs font-medium mt-1">Connecteur Dropbox Intelligent</p>
+                <div className="min-h-screen flex items-center justify-center bg-slate-900 text-white p-4">
+                    <div className="w-full max-w-md p-8 bg-slate-800 rounded-2xl shadow-2xl border border-slate-700 animate-fade">
+                        <div className="text-center mb-8">
+                            <h1 className="text-3xl font-black text-blue-500 mb-2">TarifiersDBX-V1</h1>
+                            <p className="text-slate-400">Portail Tarifs & Synchronisation</p>
                         </div>
-                        <form onSubmit={handleLogin} className="p-8 space-y-4">
-                            {loginError && <div className="bg-red-50 text-red-600 p-3 rounded-lg text-xs font-bold text-center">{loginError}</div>}
-                            <div><label className="text-xs font-bold text-slate-400 uppercase ml-1">Utilisateur</label><input className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none" value={loginForm.username} onChange={e => setLoginForm({...loginForm, username: e.target.value})} /></div>
-                            <div><label className="text-xs font-bold text-slate-400 uppercase ml-1">Mot de passe</label><input type="password" className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none" value={loginForm.password} onChange={e => setLoginForm({...loginForm, password: e.target.value})} /></div>
-                            <button className="w-full bg-slate-900 text-white font-bold py-4 rounded-xl shadow-lg hover:bg-slate-800 transition-transform active:scale-95">SE CONNECTER</button>
+                        <form onSubmit={handleLogin} className="space-y-4">
+                            {loginError && <div className="bg-red-500/20 text-red-300 p-3 rounded text-sm text-center font-bold">{loginError}</div>}
+                            <div>
+                                <label className="block text-xs font-bold uppercase text-slate-500 mb-1">ID Utilisateur</label>
+                                <input className="w-full bg-slate-900 border border-slate-700 rounded p-3 focus:border-blue-500 outline-none" value={loginForm.username} onChange={e => setLoginForm({...loginForm, username: e.target.value})} placeholder="ex: admin" />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold uppercase text-slate-500 mb-1">Mot de passe</label>
+                                <input type="password" className="w-full bg-slate-900 border border-slate-700 rounded p-3 focus:border-blue-500 outline-none" value={loginForm.password} onChange={e => setLoginForm({...loginForm, password: e.target.value})} placeholder="••••" />
+                            </div>
+                            <button className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded transition-all transform active:scale-95">Connexion</button>
                         </form>
+                        <div className="mt-6 text-center text-xs text-slate-600">
+                            <p>Admin par défaut : admin / admin</p>
+                            <p>Collaborateur : collab / 1234</p>
+                        </div>
                     </div>
                 </div>
             );
 
             return (
-                <div className="min-h-screen flex flex-col bg-slate-50 font-sans text-slate-800">
-                    <nav className="bg-white border-b border-slate-200 h-16 flex items-center justify-between px-6 sticky top-0 z-50">
-                        <div className="flex items-center gap-3 cursor-pointer" onClick={() => setView('search')}>
-                            <div className="bg-blue-600 p-1.5 rounded-lg"><Icon name="Box" className="text-white" size={18}/></div>
-                            <span className="font-black text-lg tracking-tight text-slate-800">CMGP<span className="text-blue-600">DBX</span></span>
+                <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
+                    {/* NAV */}
+                    <nav className="bg-white border-b border-slate-200 h-16 flex items-center justify-between px-6 sticky top-0 z-50 shadow-sm">
+                        <div className="flex items-center gap-2 cursor-pointer" onClick={() => setActiveTab('search')}>
+                            <div className="bg-blue-600 text-white p-1.5 rounded-lg"><Icon name="Database" /></div>
+                            <span className="font-black text-lg hidden md:inline">Tarifiers<span className="text-blue-600">DBX-V1</span></span>
                         </div>
-                        <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-lg">
-                            <button onClick={() => setView('search')} className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${view === 'search' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500 hover:text-slate-700'}`}>Recherche</button>
-                            <button onClick={() => setView('admin')} className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${view === 'admin' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500 hover:text-slate-700'}`}>Admin & Sync</button>
+                        <div className="flex items-center gap-2 md:gap-4">
+                            {currentUser.role === 'admin' ? (
+                                <div className="flex bg-slate-100 p-1 rounded-lg">
+                                    <button onClick={() => setActiveTab('search')} className={`px-3 md:px-4 py-1.5 rounded text-sm font-bold transition-all ${activeTab === 'search' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>Recherche</button>
+                                    <button onClick={() => setActiveTab('admin')} className={`px-3 md:px-4 py-1.5 rounded text-sm font-bold transition-all ${activeTab === 'admin' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>Admin</button>
+                                    <button onClick={() => setActiveTab('users')} className={`px-3 md:px-4 py-1.5 rounded text-sm font-bold transition-all ${activeTab === 'users' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>Users</button>
+                                </div>
+                            ) : (
+                                <div className="flex items-center gap-2 text-sm text-slate-500 bg-slate-100 px-3 py-1.5 rounded-lg">
+                                    <Icon name="User" size={14}/> {currentUser.name}
+                                </div>
+                            )}
+                            <button onClick={() => { setCurrentUser(null); setView('login'); }} className="text-slate-400 hover:text-red-500 transition-colors"><Icon name="LogOut" /></button>
                         </div>
                     </nav>
 
-                    <main className="flex-1 max-w-5xl w-full mx-auto p-6">
-                        {view === 'search' && (
-                            <div className="animate-fade">
-                                <div className="flex justify-center gap-4 mb-8">
-                                    <button onClick={() => setSearchTab('tarifs')} className={`flex items-center gap-2 px-6 py-3 rounded-full font-bold text-sm transition-all ${searchTab === 'tarifs' ? 'bg-blue-600 text-white shadow-lg shadow-blue-200' : 'bg-white text-slate-400 border border-slate-200 hover:bg-slate-50'}`}><Icon name="DollarSign" size={16}/> Tarifs</button>
-                                    <button onClick={() => setSearchTab('ft')} className={`flex items-center gap-2 px-6 py-3 rounded-full font-bold text-sm transition-all ${searchTab === 'ft' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-200' : 'bg-white text-slate-400 border border-slate-200 hover:bg-slate-50'}`}><Icon name="FileText" size={16}/> Fiches Techniques</button>
+                    <main className="flex-1 max-w-6xl w-full mx-auto p-4 md:p-6 relative">
+                        
+                        {/* MODAL CONFIG COLLABORATEUR (PREMIER LANCEMENT) */}
+                        {showConfigModal && (
+                            <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[100] animate-fade">
+                                <div className="bg-white p-8 rounded-2xl shadow-2xl max-w-md w-full border border-blue-100">
+                                    <div className="text-center mb-6">
+                                        <div className="inline-flex bg-blue-100 p-3 rounded-full text-blue-600 mb-3"><Icon name="CloudCog" size={32}/></div>
+                                        <h2 className="text-xl font-bold">Configuration Initiale</h2>
+                                        <p className="text-slate-500 text-sm mt-1">Pour accéder aux données partagées, veuillez entrer le Token fourni par l'administrateur.</p>
+                                    </div>
+                                    <input 
+                                        type="password" 
+                                        placeholder="Collez le Token Dropbox ici..." 
+                                        className="w-full p-3 border border-slate-300 rounded-lg mb-4 text-sm font-mono focus:border-blue-500 outline-none"
+                                        value={dbxConfig.token}
+                                        onChange={e => setDbxConfig({...dbxConfig, token: e.target.value})}
+                                    />
+                                    <button 
+                                        onClick={() => {
+                                            if(dbxConfig.token) {
+                                                setShowConfigModal(false);
+                                                loadCloudDatabase();
+                                            } else {
+                                                alert("Token requis");
+                                            }
+                                        }}
+                                        className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 transition-colors"
+                                    >
+                                        Valider et Charger les Données
+                                    </button>
                                 </div>
-
-                                {searchTab === 'tarifs' && (
-                                    <div className="max-w-2xl mx-auto">
-                                        <div className="text-center mb-6">
-                                            <div className="inline-flex items-center gap-2 px-3 py-1 bg-blue-50 text-blue-700 rounded-full text-xs font-bold shadow-sm border border-blue-100">
-                                                <Icon name="Database" size={12}/> {totalProductsIndexed} produits indexés ({tarifs.length} fichiers)
-                                            </div>
-                                        </div>
-
-                                        <div className="relative mb-8 group"><div className="absolute inset-y-0 left-4 flex items-center pointer-events-none text-slate-300 group-focus-within:text-blue-500 transition-colors"><Icon name="Search" size={20}/></div><input className="w-full pl-12 pr-4 py-4 bg-white border border-slate-200 rounded-2xl shadow-sm focus:ring-4 focus:ring-blue-50 outline-none text-lg transition-all placeholder:text-slate-300" placeholder="Rechercher un produit (ex: Pompe X200)..." value={queryStr} onChange={e => setQueryStr(e.target.value)}/></div>
-                                        
-                                        <div className="space-y-3">
-                                            {searchResults.length > 0 ? searchResults.map((p, i) => (
-                                                <div key={i} className={`bg-white p-4 rounded-xl border transition-all group flex items-center justify-between cursor-default ${p.type === 'file' ? 'border-orange-200 bg-orange-50/30' : 'border-slate-100 hover:border-blue-300 hover:shadow-md'}`}>
-                                                    <div className="flex items-center gap-4">
-                                                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center font-bold text-lg ${p.type === 'file' ? 'bg-orange-100 text-orange-600' : 'bg-blue-50 text-blue-600'}`}>
-                                                            {p.type === 'file' ? <Icon name="File" size={18}/> : (p.name ? p.name.charAt(0).toUpperCase() : '?')}
-                                                        </div>
-                                                        <div>
-                                                            <div className="font-bold text-slate-800">{p.name || "Produit sans nom"}</div>
-                                                            <div className="text-xs text-slate-400 font-medium flex items-center gap-1">
-                                                                <Icon name="Box" size={10}/> {p.packaging || '-'} • <span className="text-blue-400">{p.source}</span>
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                    <div className="text-right">
-                                                        <div className="text-xl font-black text-slate-800">{p.type === 'file' ? '' : p.price} <span className="text-xs font-bold text-slate-400">{p.type === 'file' ? '' : 'DH'}</span></div>
-                                                        <button onClick={() => openDropboxFile(p.path)} className="text-[10px] font-bold text-blue-600 hover:underline mt-1 flex items-center justify-end gap-1">Voir Source <Icon name="ExternalLink" size={10}/></button>
-                                                    </div>
-                                                </div>
-                                            )) : (
-                                                queryStr.length > 1 && <div className="text-center py-12 text-slate-400"><Icon name="Ghost" size={32} className="mx-auto mb-2 opacity-50"/><p>Aucun produit trouvé.</p></div>
-                                            )}
-                                        </div>
-                                    </div>
-                                )}
-
-                                {searchTab === 'ft' && (
-                                    <div className="max-w-2xl mx-auto">
-                                        <div className="relative mb-8 group"><div className="absolute inset-y-0 left-4 flex items-center pointer-events-none text-slate-300 group-focus-within:text-indigo-500 transition-colors"><Icon name="Search" size={20}/></div><input className="w-full pl-12 pr-4 py-4 bg-white border border-slate-200 rounded-2xl shadow-sm focus:ring-4 focus:ring-indigo-50 outline-none text-lg transition-all placeholder:text-slate-300" placeholder="Rechercher une fiche technique..." value={ftQueryStr} onChange={e => setFtQueryStr(e.target.value)}/></div>
-                                        <div className="grid grid-cols-2 gap-4">
-                                            {ftSearchResults.length > 0 ? ftSearchResults.map((ft, i) => (
-                                                <div key={i} onClick={() => openDropboxFile(ft.path)} className="bg-white p-4 rounded-xl border border-slate-100 hover:border-indigo-300 hover:shadow-md transition-all cursor-pointer group">
-                                                    <div className="flex items-start justify-between mb-3"><div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg"><Icon name="FileText" size={20}/></div><span className="text-[10px] font-mono text-slate-400 bg-slate-50 px-2 py-1 rounded">PDF</span></div>
-                                                    <h3 className="font-bold text-slate-700 group-hover:text-indigo-600 transition-colors line-clamp-2">{ft.productName}</h3><p className="text-xs text-slate-400 mt-1 truncate">{ft.fileName}</p>
-                                                </div>
-                                            )) : (
-                                                ftQueryStr.length > 1 && <div className="col-span-2 text-center py-12 text-slate-400">Aucune fiche trouvée.</div>
-                                            )}
-                                        </div>
-                                    </div>
-                                )}
                             </div>
                         )}
 
-                        {view === 'admin' && (
+                        {/* RECHERCHE */}
+                        {activeTab === 'search' && (
                             <div className="animate-fade">
-                                <div className="bg-white rounded-3xl p-8 border border-slate-200 shadow-sm">
-                                    <div className="flex items-center gap-4 mb-8"><div className="bg-blue-600 text-white p-3 rounded-xl"><Icon name="Cloud" size={24}/></div><div><h2 className="text-xl font-bold text-slate-800">Centre de Synchronisation</h2><p className="text-sm text-slate-500">Gérez la connexion avec Dropbox</p></div></div>
-                                    <div className="flex gap-4 mb-6 border-b border-slate-100 pb-1">
-                                        <button onClick={() => setAdminTab('sync')} className={`pb-3 px-2 text-sm font-bold border-b-2 transition-colors ${adminTab === 'sync' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-400 hover:text-slate-600'}`}>État & Sync</button>
-                                        <button onClick={() => setAdminTab('config')} className={`pb-3 px-2 text-sm font-bold border-b-2 transition-colors ${adminTab === 'config' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-400 hover:text-slate-600'}`}>Configuration</button>
+                                <div className="max-w-3xl mx-auto text-center mb-8 pt-4">
+                                    <h2 className="text-2xl font-bold mb-2 text-slate-800">Catalogue Produits</h2>
+                                    <div className="flex justify-center gap-4 text-xs font-medium text-slate-500 mb-6">
+                                        <span className="bg-white border px-3 py-1 rounded-full">{tarifs.length} Fichiers</span>
+                                        <span className="bg-white border px-3 py-1 rounded-full">{totalProducts} Produits</span>
+                                        {currentUser.role === 'viewer' && (
+                                            <button onClick={loadCloudDatabase} className="text-blue-600 hover:underline flex items-center gap-1">
+                                                <Icon name="RefreshCw" size={10}/> Actualiser Données
+                                            </button>
+                                        )}
                                     </div>
+                                    
+                                    <div className="relative group">
+                                        <input 
+                                            className="w-full p-4 pl-12 rounded-2xl border border-slate-200 shadow-lg focus:ring-4 focus:ring-blue-50 outline-none text-lg transition-all"
+                                            placeholder="Rechercher (ex: Pompe, Engrais 20-20-20)..."
+                                            value={searchQuery}
+                                            onChange={e => setSearchQuery(e.target.value)}
+                                            autoFocus
+                                        />
+                                        <div className="absolute left-4 top-4 text-slate-300 group-focus-within:text-blue-500 transition-colors"><Icon name="Search" size={24} /></div>
+                                    </div>
+                                </div>
 
-                                    {adminTab === 'sync' && (
-                                        <div className="space-y-6">
-                                            <div className="bg-slate-50 rounded-2xl p-6 border border-slate-200 flex flex-col md:flex-row items-center justify-between gap-6">
-                                                <div><div className="text-xs font-bold text-slate-400 uppercase mb-1">Dernière mise à jour</div><div className="text-lg font-bold text-slate-800 flex items-center gap-2"><Icon name="Clock" size={18} className="text-slate-400"/>{syncInfo.lastSync || "Jamais"}</div><div className="text-xs text-slate-500 mt-2">{tarifs.length} tarifs • {fichesTechniques.length} fiches indexées</div></div>
-                                                <div className="flex flex-col gap-2">
-                                                    <button onClick={() => runSync(false)} disabled={syncStatus === 'loading'} className={`px-6 py-3 rounded-xl font-bold text-white shadow-lg flex items-center gap-2 transition-all ${syncStatus === 'loading' ? 'bg-slate-400 cursor-wait' : 'bg-blue-600 hover:bg-blue-700 active:scale-95'}`}><Icon name={syncStatus === 'loading' ? 'Loader2' : 'RefreshCw'} className={syncStatus === 'loading' ? 'animate-spin' : ''}/>{syncStatus === 'loading' ? 'Scan en cours...' : 'Synchroniser Maintenant'}</button>
-                                                    <button onClick={() => { if(confirm('Voulez-vous vraiment effacer l\'index local et tout rescanner ?')) runSync(true); }} disabled={syncStatus === 'loading'} className="text-xs text-red-400 hover:text-red-600 underline text-center">Forcer Re-Scan Complet</button>
+                                <div className="space-y-3 pb-20">
+                                    {searchResults.map((res, i) => (
+                                        <div key={i} className={`bg-white p-4 rounded-xl border border-slate-100 hover:border-blue-400 hover:shadow-md transition-all flex justify-between items-center group cursor-default ${res.type === 'file' ? 'bg-orange-50/50 border-orange-100' : ''}`}>
+                                            <div className="flex items-center gap-4">
+                                                <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${res.type === 'file' ? 'bg-orange-100 text-orange-600' : 'bg-blue-50 text-blue-600'}`}>
+                                                    <Icon name={res.type === 'file' ? "FileText" : "Box"} size={20}/>
+                                                </div>
+                                                <div>
+                                                    <div className="font-bold text-slate-800 text-lg leading-tight">{res.name}</div>
+                                                    <div className="text-xs text-slate-500 flex items-center gap-2 mt-1">
+                                                        <span className="bg-slate-100 px-2 py-0.5 rounded text-slate-600 font-medium">{res.source}</span>
+                                                        <span className={`flex items-center gap-1 ${res.date_tarif.includes("Non") || res.date_tarif.includes("Erreur") ? "text-red-400" : "text-green-600 font-medium"}`}>
+                                                            <Icon name="Calendar" size={12}/> {res.date_tarif}
+                                                        </span>
+                                                    </div>
                                                 </div>
                                             </div>
-                                            <div className="bg-slate-900 rounded-xl p-4 font-mono text-xs text-green-400 h-48 overflow-y-auto"><div className="opacity-50 mb-2"># Console de synchronisation Dropbox...</div>{syncLog && <div className="whitespace-pre-line">> {syncLog}</div>}</div>
+                                            <div className="text-right pl-4">
+                                                <div className="text-2xl font-black text-blue-600 whitespace-nowrap">{res.price} <span className="text-xs text-slate-400 font-bold">{res.unit || 'DH'}</span></div>
+                                            </div>
                                         </div>
-                                    )}
-
-                                    {adminTab === 'config' && (
-                                        <div className="space-y-6 max-w-lg">
-                                            <div className="bg-yellow-50 text-yellow-800 p-4 rounded-xl text-xs border border-yellow-100 leading-relaxed"><strong className="block mb-1">Comment obtenir le Token ?</strong>1. Allez sur <a href="https://www.dropbox.com/developers/apps" target="_blank" className="underline font-bold">Dropbox Developers</a>.<br/>2. Créez une app ("Scoped access", "Full Dropbox").<br/>3. Dans l'onglet "Permissions", cochez <code>files.content.read</code>.<br/>4. Dans l'onglet "Settings", générez un "Generated Access Token".</div>
-                                            <div className="bg-blue-50 text-blue-900 p-4 rounded-xl text-xs border border-blue-100 flex justify-between items-center"><div><strong className="block">Sauvegarder / Restaurer</strong><span className="opacity-75">Pour migrer vers un autre hébergement (ou Local)</span></div><div className="flex gap-2"><button onClick={handleExportConfig} className="bg-white border border-blue-200 text-blue-600 px-3 py-1.5 rounded-lg hover:bg-blue-50 font-bold shadow-sm flex items-center gap-1"><Icon name="Download" size={14}/> Exporter</button><button onClick={() => fileInputRef.current.click()} className="bg-blue-600 text-white px-3 py-1.5 rounded-lg hover:bg-blue-700 font-bold shadow-sm flex items-center gap-1"><Icon name="Upload" size={14}/> Importer</button><input type="file" ref={fileInputRef} className="hidden" accept=".json" onChange={handleImportConfig} /></div></div>
-                                            <div><label className="block text-xs font-bold text-slate-500 uppercase mb-2">Token d'Accès Dropbox</label><input type="password" className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none font-mono text-sm" placeholder="sl.BHz..." value={dbxConfig.token} onChange={e => setDbxConfig({...dbxConfig, token: e.target.value})}/></div>
-                                            <div className="grid grid-cols-2 gap-4"><div><label className="block text-xs font-bold text-slate-500 uppercase mb-2">Dossier Tarifs</label><input className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-sm" placeholder="/Tarifs" value={dbxConfig.pathTarifs} onChange={e => setDbxConfig({...dbxConfig, pathTarifs: e.target.value})}/></div><div><label className="block text-xs font-bold text-slate-500 uppercase mb-2">Dossier Fiches</label><input className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-sm" placeholder="/Fiches" value={dbxConfig.pathFT} onChange={e => setDbxConfig({...dbxConfig, pathFT: e.target.value})}/></div></div>
-                                            <div className="pt-4"><button onClick={() => { alert('Configuration sauvegardée !'); setAdminTab('sync'); }} className="bg-slate-800 text-white px-6 py-3 rounded-xl font-bold text-sm hover:bg-slate-900">Sauvegarder</button></div>
+                                    ))}
+                                    {searchQuery && searchResults.length === 0 && (
+                                        <div className="text-center py-10 text-slate-400 flex flex-col items-center">
+                                            <Icon name="Ghost" size={32} className="mb-2 opacity-50"/>
+                                            <p>Aucun produit trouvé pour "{searchQuery}".</p>
                                         </div>
                                     )}
                                 </div>
                             </div>
                         )}
+
+                        {/* ADMIN DASHBOARD */}
+                        {activeTab === 'admin' && currentUser.role === 'admin' && (
+                            <div className="animate-fade grid grid-cols-1 lg:grid-cols-3 gap-6 pb-10">
+                                <div className="lg:col-span-1 space-y-6">
+                                    <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                                        <h3 className="font-bold text-lg mb-4 flex items-center gap-2 text-slate-700"><Icon name="Settings" /> Configuration</h3>
+                                        <div className="space-y-4">
+                                            <div>
+                                                <label className="text-xs font-bold uppercase text-slate-400">Token Dropbox</label>
+                                                <input type="password" value={dbxConfig.token} onChange={e => setDbxConfig({...dbxConfig, token: e.target.value})} className="w-full mt-1 p-2 border rounded bg-slate-50 text-sm font-mono" />
+                                            </div>
+                                            <div>
+                                                <label className="text-xs font-bold uppercase text-slate-400">Clé API Gemini</label>
+                                                <input type="password" value={dbxConfig.geminiKey} onChange={e => setDbxConfig({...dbxConfig, geminiKey: e.target.value})} className="w-full mt-1 p-2 border rounded bg-slate-50 text-sm font-mono" />
+                                            </div>
+                                            <div>
+                                                <label className="text-xs font-bold uppercase text-slate-400">Dossier Cible</label>
+                                                <input value={dbxConfig.pathTarifs} onChange={e => setDbxConfig({...dbxConfig, pathTarifs: e.target.value})} className="w-full mt-1 p-2 border rounded bg-slate-50 text-sm" />
+                                            </div>
+                                            <div className="bg-blue-50 p-3 rounded text-xs text-blue-800 leading-relaxed border border-blue-100">
+                                                <strong>Note Admin :</strong> Après chaque scan, la base de données est automatiquement publiée sur Dropbox (db_tarifs.json) pour que les collaborateurs soient à jour.
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="bg-slate-900 text-green-400 p-4 rounded-2xl font-mono text-xs h-64 overflow-y-auto shadow-inner border border-slate-700">
+                                        <div className="flex justify-between items-center border-b border-green-800 pb-2 mb-2 opacity-70">
+                                            <span>> Console Système</span>
+                                            {syncStatus === 'working' && <Icon name="Loader2" size={14} className="animate-spin"/>}
+                                        </div>
+                                        <div className="whitespace-pre-wrap leading-5">{syncLog || "En attente..."}</div>
+                                    </div>
+                                </div>
+
+                                <div className="lg:col-span-2 bg-white rounded-2xl shadow-sm border border-slate-200 flex flex-col h-[600px]">
+                                    <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50 rounded-t-2xl">
+                                        <div>
+                                            <h3 className="font-bold text-lg text-slate-700">État des Fichiers</h3>
+                                            <p className="text-xs text-slate-500">Synchronisation Dropbox & IA</p>
+                                        </div>
+                                        <div className="flex gap-2">
+                                            <button onClick={() => runFullSync(false)} disabled={syncStatus === 'working'} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-bold text-sm flex items-center gap-2 shadow-sm disabled:opacity-50 transition-colors">
+                                                <Icon name={syncStatus === 'working' ? "Loader2" : "RefreshCw"} className={syncStatus === 'working' ? "animate-spin" : ""} /> 
+                                                {syncStatus === 'working' ? 'Traitement...' : 'Scanner & Publier'}
+                                            </button>
+                                            <button onClick={() => {if(confirm("Tout effacer et rescanner ?")) runFullSync(true)}} disabled={syncStatus === 'working'} className="text-red-500 hover:bg-red-50 border border-transparent hover:border-red-100 px-3 py-2 rounded-lg font-bold text-xs transition-colors">
+                                                Reset Total
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div className="overflow-auto flex-1">
+                                        <table className="w-full text-sm text-left">
+                                            <thead className="bg-white text-slate-400 font-bold uppercase text-[10px] sticky top-0 shadow-sm z-10">
+                                                <tr>
+                                                    <th className="p-4 bg-slate-50">Fichier</th>
+                                                    <th className="p-4 bg-slate-50">Date Tarif</th>
+                                                    <th className="p-4 bg-slate-50 text-center">Produits</th>
+                                                    <th className="p-4 bg-slate-50 text-right">Dernier Scan</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-100">
+                                                {tarifs.map(t => (
+                                                    <tr key={t.id} className="hover:bg-blue-50/50 transition-colors">
+                                                        <td className="p-4 font-bold text-slate-700 max-w-[200px] truncate" title={t.name}>{t.name}</td>
+                                                        <td className="p-4">
+                                                            <span className={`px-2 py-1 rounded text-xs font-bold ${t.date_tarif.includes("Non") ? "bg-red-100 text-red-600" : "bg-green-100 text-green-700"}`}>
+                                                                {t.date_tarif}
+                                                            </span>
+                                                        </td>
+                                                        <td className="p-4 text-center font-bold text-blue-600 bg-blue-50/30">{t.products?.length || 0}</td>
+                                                        <td className="p-4 text-right text-slate-400 text-xs font-mono">{t.index_date.split(' ')[0]}</td>
+                                                    </tr>
+                                                ))}
+                                                {tarifs.length === 0 && <tr><td colSpan="4" className="p-12 text-center text-slate-400 italic">Aucune donnée locale. Lancez une synchronisation.</td></tr>}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* USERS TAB */}
+                        {activeTab === 'users' && currentUser.role === 'admin' && (
+                            <div className="animate-fade max-w-2xl mx-auto bg-white rounded-2xl shadow-sm border border-slate-200 p-8">
+                                <h3 className="font-bold text-lg mb-6 flex items-center gap-2 text-slate-700"><Icon name="Users" /> Équipe & Accès</h3>
+                                <div className="space-y-3 mb-8">
+                                    {users.map((u, idx) => (
+                                        <div key={idx} className="flex items-center justify-between p-4 border border-slate-100 rounded-xl bg-slate-50 hover:border-blue-200 transition-colors">
+                                            <div className="flex items-center gap-3">
+                                                <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-white ${u.role === 'admin' ? 'bg-slate-800' : 'bg-blue-500'}`}>
+                                                    {u.name.charAt(0)}
+                                                </div>
+                                                <div>
+                                                    <div className="font-bold text-slate-800">{u.name}</div>
+                                                    <div className="text-xs text-slate-500 font-mono">ID: {u.id} • {u.role === 'admin' ? 'Administrateur' : 'Collaborateur'}</div>
+                                                </div>
+                                            </div>
+                                            {u.id !== 'admin' && (
+                                                <button onClick={() => setUsers(users.filter((_, i) => i !== idx))} className="text-slate-400 hover:text-red-500 p-2"><Icon name="Trash2" size={18}/></button>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="bg-slate-50 p-6 rounded-xl border border-slate-200">
+                                    <h4 className="text-xs font-bold uppercase text-slate-500 mb-4">Ajouter un membre</h4>
+                                    <form onSubmit={(e) => {
+                                        e.preventDefault();
+                                        const form = e.target;
+                                        setUsers([...users, { name: form.name.value, id: form.login.value, pass: form.pass.value, role: form.role.value }]);
+                                        form.reset();
+                                    }} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        <input name="name" placeholder="Nom complet" required className="p-3 border rounded-lg text-sm outline-none focus:border-blue-500" />
+                                        <input name="login" placeholder="Identifiant" required className="p-3 border rounded-lg text-sm outline-none focus:border-blue-500" />
+                                        <input name="pass" placeholder="Mot de passe" required className="p-3 border rounded-lg text-sm outline-none focus:border-blue-500" />
+                                        <select name="role" className="p-3 border rounded-lg text-sm bg-white outline-none focus:border-blue-500">
+                                            <option value="viewer">Collaborateur (Lecture seule)</option>
+                                            <option value="admin">Administrateur</option>
+                                        </select>
+                                        <button className="md:col-span-2 bg-slate-800 text-white py-3 rounded-lg text-sm font-bold hover:bg-slate-900 transition-colors mt-2">Créer l'accès</button>
+                                    </form>
+                                </div>
+                            </div>
+                        )}
+
                     </main>
                 </div>
             );
