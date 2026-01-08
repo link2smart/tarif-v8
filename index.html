@@ -285,6 +285,48 @@
             return <span ref={iconRef} className="inline-flex items-center justify-center" />;
         };
 
+        // --- UTILS COMPARISON ---
+        const generateFluctuationReport = (oldProducts, newProducts) => {
+            const report = { date: new Date().toLocaleString(), added: [], removed: [], changed: [] };
+            const oldMap = new Map();
+            (oldProducts || []).forEach(p => { if(p.name) oldMap.set(p.name.trim(), p); });
+            
+            const newMap = new Map();
+            (newProducts || []).forEach(p => { if(p.name) newMap.set(p.name.trim(), p); });
+
+            // Detect Changes and Additions
+            (newProducts || []).forEach(newP => {
+                if(!newP.name) return;
+                const name = newP.name.trim();
+                const oldP = oldMap.get(name);
+                
+                if (!oldP) {
+                    report.added.push(newP);
+                } else {
+                    const priceOld = parseFloat(String(oldP.price).replace(/,/g, '.').replace(/[^0-9.]/g, '')) || 0;
+                    const priceNew = parseFloat(String(newP.price).replace(/,/g, '.').replace(/[^0-9.]/g, '')) || 0;
+                    if (Math.abs(priceOld - priceNew) > 0.01) { // Tolérance pour float
+                        report.changed.push({ 
+                            name, 
+                            oldPrice: priceOld, 
+                            newPrice: priceNew, 
+                            diff: (priceNew - priceOld).toFixed(2),
+                            unit: newP.unit || 'DH'
+                        });
+                    }
+                }
+            });
+
+            // Detect Removals
+            (oldProducts || []).forEach(oldP => {
+                if(oldP.name && !newMap.has(oldP.name.trim())) {
+                    report.removed.push(oldP);
+                }
+            });
+
+            return report;
+        };
+
         // --- APPLICATION ---
         function App() {
             // STATE
@@ -322,6 +364,9 @@
             // CALCULATRICE STATE
             const [calcState, setCalcState] = useState({ show: false, product: null, basePrice: 0, baseLabel: '' });
             const [extraDiscount, setExtraDiscount] = useState('');
+
+            // REPORT VIEWER STATE
+            const [viewingReport, setViewingReport] = useState(null);
 
             // VISUALISATEUR STATE
             const [viewingFile, setViewingFile] = useState(null);
@@ -629,11 +674,26 @@
                     const uploadMeta = await dbxUploadFile(dbxConfig, setDbxConfig, targetPath, file);
                     const analysis = await analyzePDF(file, file.name);
                     let newTarifs = [...tarifs];
-                    if (adminUploadMode === 'update' && targetTarifId) newTarifs = newTarifs.filter(t => t.id !== targetTarifId);
+                    
+                    let report = null;
+
+                    if (adminUploadMode === 'update' && targetTarifId) {
+                        // LOGIQUE DE COMPARAISON (REPORT)
+                        const oldTarif = tarifs.find(t => t.id === targetTarifId);
+                        if (oldTarif && oldTarif.products) {
+                            report = generateFluctuationReport(oldTarif.products, analysis.products);
+                        }
+                        newTarifs = newTarifs.filter(t => t.id !== targetTarifId);
+                    } else {
+                         // NEW UPLOAD REPORT (ALL ADDED)
+                         report = generateFluctuationReport([], analysis.products);
+                    }
+
                     const docEntry = { 
                         id: uploadMeta.id, name: uploadMeta.name, path: uploadMeta.path_lower, 
                         server_modified: uploadMeta.server_modified, index_date: new Date().toLocaleString(), 
-                        date_tarif: analysis.date_tarif, products: analysis.products, t4_percentage: parseFloat(t4Value) || 0 
+                        date_tarif: analysis.date_tarif, products: analysis.products, t4_percentage: parseFloat(t4Value) || 0,
+                        report: report // STOCKAGE DU RAPPORT
                     };
                     newTarifs.push(docEntry);
                     setTarifs(newTarifs);
@@ -831,6 +891,72 @@
                             </div>
                         )}
 
+                        {/* REPORT VIEWER MODAL */}
+                        {viewingReport && (
+                            <div className="fixed inset-0 z-[120] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-fade">
+                                <div className="bg-white p-6 rounded-3xl shadow-2xl max-w-2xl w-full relative max-h-[80vh] overflow-y-auto">
+                                    <button onClick={() => setViewingReport(null)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><Icon name="X"/></button>
+                                    <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><Icon name="TrendingUp" className="text-blue-600"/> Rapport de Fluctuation</h3>
+                                    <p className="text-xs text-slate-400 mb-6">Mise à jour du : {viewingReport.date}</p>
+                                    
+                                    <div className="space-y-6">
+                                        {viewingReport.changed.length > 0 && (
+                                            <div>
+                                                <h4 className="text-sm font-bold text-orange-600 mb-2 flex items-center gap-2"><Icon name="AlertCircle" size={16}/> Prix Modifiés ({viewingReport.changed.length})</h4>
+                                                <div className="bg-orange-50 rounded-xl border border-orange-100 overflow-hidden">
+                                                    {viewingReport.changed.map((item, idx) => (
+                                                        <div key={idx} className="p-3 border-b border-orange-100 last:border-0 flex justify-between items-center text-xs">
+                                                            <div className="font-medium text-slate-700">{item.name}</div>
+                                                            <div className="flex items-center gap-3">
+                                                                <span className="text-slate-400 line-through">{item.oldPrice}</span>
+                                                                <Icon name="ArrowRight" size={12} className="text-slate-300"/>
+                                                                <span className="font-bold text-slate-800">{item.newPrice} {item.unit}</span>
+                                                                <span className={`px-2 py-0.5 rounded-full font-bold ${item.diff > 0 ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-600'}`}>
+                                                                    {item.diff > 0 ? '+' : ''}{item.diff}
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {viewingReport.added.length > 0 && (
+                                            <div>
+                                                <h4 className="text-sm font-bold text-green-600 mb-2 flex items-center gap-2"><Icon name="PlusCircle" size={16}/> Nouveaux Articles ({viewingReport.added.length})</h4>
+                                                <div className="bg-green-50 rounded-xl border border-green-100 p-3 text-xs space-y-1">
+                                                    {viewingReport.added.map((item, idx) => (
+                                                        <div key={idx} className="flex justify-between">
+                                                            <span className="font-medium text-slate-700">{item.name}</span>
+                                                            <span className="font-bold text-green-700">{item.price} {item.unit}</span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {viewingReport.removed.length > 0 && (
+                                            <div>
+                                                <h4 className="text-sm font-bold text-red-600 mb-2 flex items-center gap-2"><Icon name="Trash2" size={16}/> Articles Retirés ({viewingReport.removed.length})</h4>
+                                                <div className="bg-red-50 rounded-xl border border-red-100 p-3 text-xs space-y-1 text-slate-600">
+                                                    {viewingReport.removed.map((item, idx) => (
+                                                        <div key={idx} className="flex justify-between opacity-75">
+                                                            <span>{item.name}</span>
+                                                            <span className="line-through">{item.price}</span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {viewingReport.changed.length === 0 && viewingReport.added.length === 0 && viewingReport.removed.length === 0 && (
+                                            <div className="text-center py-8 text-slate-400 italic">Aucun changement détecté lors de cette mise à jour.</div>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
                         {viewingFile && (
                             <div className="fixed inset-0 z-[100] bg-slate-900 flex flex-col animate-fade">
                                 <div className="flex items-center justify-between p-4 bg-slate-900 text-white border-b border-slate-700 shadow-xl z-20">
@@ -936,7 +1062,7 @@
                                         <div className="bg-slate-900 text-green-400 p-5 rounded-3xl font-mono text-xs h-60 overflow-y-auto shadow-inner"><div className="opacity-50 border-b border-green-800 pb-2 mb-2">System Logs</div><div className="whitespace-pre-wrap">{syncLog || "Prêt."}</div></div>
                                     </div>
                                     {showAdminUploadModal && (<div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4"><div className="bg-white p-8 rounded-3xl shadow-2xl max-w-md w-full animate-fade relative"><button onClick={() => setShowAdminUploadModal(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><Icon name="X"/></button><div className="mb-6"><div className="inline-flex bg-blue-100 p-3 rounded-full text-blue-600 mb-3"><Icon name="FilePlus" size={24}/></div><h2 className="text-xl font-bold">Gestion Tarifs</h2><p className="text-sm text-slate-500">Ajouter ou remplacer un catalogue</p></div><form onSubmit={handleManualTarifUpload} className="space-y-4"><div className="flex bg-slate-50 p-1 rounded-xl"><button type="button" onClick={() => setAdminUploadMode('new')} className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${adminUploadMode === 'new' ? 'bg-white shadow text-blue-600' : 'text-slate-400'}`}>Nouveau</button><button type="button" onClick={() => setAdminUploadMode('update')} className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${adminUploadMode === 'update' ? 'bg-white shadow text-blue-600' : 'text-slate-400'}`}>Mise à jour</button></div>{adminUploadMode === 'update' && (<div><label className="text-xs font-bold text-slate-500 uppercase mb-1 block">Tarif à remplacer</label><select className="w-full p-3 border rounded-xl text-sm bg-white" required value={targetTarifId} onChange={e => setTargetTarifId(e.target.value)}><option value="">-- Choisir --</option>{tarifs.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></div>)}<div><label className="text-xs font-bold text-slate-500 uppercase mb-1 block">Fichier PDF</label><input type="file" accept="application/pdf" required ref={adminFileInputRef} className="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"/></div><div><label className="text-xs font-bold text-slate-500 uppercase mb-1 block">Remise T4 (%)</label><input type="number" min="0" max="100" step="0.1" value={t4Value} onChange={e => setT4Value(e.target.value)} className="w-full p-3 border rounded-xl text-sm bg-slate-50 font-mono text-orange-600 font-bold" placeholder="0.0"/><p className="text-[10px] text-slate-400 mt-1">Sera déduit du prix TTC ou EXO pour l'affichage.</p></div><button disabled={syncStatus === 'working'} className="w-full bg-slate-800 text-white py-3 rounded-xl font-bold mt-2 hover:bg-slate-900 disabled:opacity-50 flex items-center justify-center gap-2">{syncStatus === 'working' ? <Icon name="Loader2" className="animate-spin"/> : <Icon name="UploadCloud"/>} Valider</button></form></div></div>)}
-                                    <div className="lg:col-span-2 bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden flex flex-col h-[600px]"><div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50"><h3 className="font-bold text-lg text-slate-800">Indexation</h3><div className="flex gap-2"><button onClick={handleDeleteAllTarifs} className="bg-red-50 hover:bg-red-100 text-red-600 px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1 transition-colors"><Icon name="Trash2" size={14}/> Tout Supprimer</button><button onClick={() => { setAdminUploadMode('new'); setShowAdminUploadModal(true); }} className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl font-bold text-sm flex items-center gap-2 shadow-lg shadow-indigo-200 transition-all active:scale-95"><Icon name="Plus"/> Gestion Tarifs</button><button onClick={() => handleSyncFiches()} disabled={syncStatus === 'working'} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl font-bold text-sm flex items-center gap-2 shadow-lg shadow-blue-200 transition-all active:scale-95 disabled:opacity-50"><Icon name={syncStatus === 'working' ? "Loader2" : "RefreshCw"} className={syncStatus === 'working' ? "animate-spin" : ""}/> Scan/Sync Fiches</button></div></div><div className="flex-1 overflow-auto p-0"><table className="w-full text-sm text-left"><thead className="bg-white sticky top-0 shadow-sm text-slate-500 font-bold text-[10px] uppercase"><tr><th className="p-4">Fichier</th><th className="p-4">Type</th><th className="p-4 text-center">Info</th><th className="p-4 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-50">{tarifs.map(t => (<tr key={t.id} className="hover:bg-blue-50/30 group"><td className="p-4 font-bold text-slate-700">{t.name}</td><td className="p-4"><span className="bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-bold">TARIF</span></td><td className="p-4 text-center"><div className="text-blue-600 font-bold">{t.products?.length} produits</div>{t.t4_percentage > 0 && <div className="text-xs text-orange-500 font-bold">T4: -{t.t4_percentage}%</div>}</td><td className="p-4 text-right"><button onClick={() => handleDeleteEntry('tarif', t.id, t.name)} className="text-slate-300 hover:text-red-500 transition-colors p-2" title="Supprimer"><Icon name="Trash2" size={16}/></button></td></tr>))}{fiches.map(f => (<tr key={f.id} className="hover:bg-indigo-50/30 group"><td className="p-4 font-bold text-slate-700">{f.name}</td><td className="p-4"><span className="bg-indigo-100 text-indigo-700 px-2 py-1 rounded text-xs font-bold">FICHE</span></td><td className="p-4 text-center text-slate-400">PDF</td><td className="p-4 text-right"><button onClick={() => handleDeleteEntry('fiche', f.id, f.name)} className="text-slate-300 hover:text-red-500 transition-colors p-2" title="Supprimer"><Icon name="Trash2" size={16}/></button></td></tr>))}</tbody></table></div></div></div>
+                                    <div className="lg:col-span-2 bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden flex flex-col h-[600px]"><div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50"><h3 className="font-bold text-lg text-slate-800">Indexation</h3><div className="flex gap-2"><button onClick={handleDeleteAllTarifs} className="bg-red-50 hover:bg-red-100 text-red-600 px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1 transition-colors"><Icon name="Trash2" size={14}/> Tout Supprimer</button><button onClick={() => { setAdminUploadMode('new'); setShowAdminUploadModal(true); }} className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl font-bold text-sm flex items-center gap-2 shadow-lg shadow-indigo-200 transition-all active:scale-95"><Icon name="Plus"/> Gestion Tarifs</button><button onClick={() => handleSyncFiches()} disabled={syncStatus === 'working'} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl font-bold text-sm flex items-center gap-2 shadow-lg shadow-blue-200 transition-all active:scale-95 disabled:opacity-50"><Icon name={syncStatus === 'working' ? "Loader2" : "RefreshCw"} className={syncStatus === 'working' ? "animate-spin" : ""}/> Re-Scan Global (Fiches)</button></div></div><div className="flex-1 overflow-auto p-0"><table className="w-full text-sm text-left"><thead className="bg-white sticky top-0 shadow-sm text-slate-500 font-bold text-[10px] uppercase"><tr><th className="p-4">Fichier</th><th className="p-4">Type</th><th className="p-4 text-center">Info</th><th className="p-4 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-50">{tarifs.map(t => (<tr key={t.id} className="hover:bg-blue-50/30 group"><td className="p-4 font-bold text-slate-700">{t.name}</td><td className="p-4"><span className="bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-bold">TARIF</span></td><td className="p-4 text-center"><div className="text-blue-600 font-bold">{t.products?.length} produits</div>{t.t4_percentage > 0 && <div className="text-xs text-orange-500 font-bold">T4: -{t.t4_percentage}%</div>}</td><td className="p-4 text-right"><div className="flex justify-end gap-2">{t.report && <button onClick={() => setViewingReport(t.report)} className="p-2 text-orange-500 hover:text-orange-700 bg-orange-50 rounded-lg" title="Voir Rapport Fluctuation"><Icon name="TrendingUp" size={16}/></button>}<button onClick={() => handleDeleteEntry('tarif', t.id, t.name)} className="text-slate-300 hover:text-red-500 transition-colors p-2" title="Supprimer"><Icon name="Trash2" size={16}/></button></div></td></tr>))}{fiches.map(f => (<tr key={f.id} className="hover:bg-indigo-50/30 group"><td className="p-4 font-bold text-slate-700">{f.name}</td><td className="p-4"><span className="bg-indigo-100 text-indigo-700 px-2 py-1 rounded text-xs font-bold">FICHE</span></td><td className="p-4 text-center text-slate-400">PDF</td><td className="p-4 text-right"><button onClick={() => handleDeleteEntry('fiche', f.id, f.name)} className="text-slate-300 hover:text-red-500 transition-colors p-2" title="Supprimer"><Icon name="Trash2" size={16}/></button></td></tr>))}</tbody></table></div></div></div>
                             )}
 
                             {activeTab === 'users' && currentUser.role === 'admin' && (
