@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TarifiersDBX-V2 (Secured)</title>
+    <title>Catalogue DBX V2 (Secured)</title>
     <!-- React & UI -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -12,6 +12,9 @@
     <script src="https://unpkg.com/lucide@latest"></script>
     <!-- PDF Engine -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <!-- PDF Generation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
 
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&display=swap');
@@ -50,6 +53,7 @@
 
     <script type="text/babel">
         const { useState, useEffect, useMemo, useRef, Component } = React;
+        const { jsPDF } = window.jspdf;
 
         // --- ERROR BOUNDARY ---
         class ErrorBoundary extends Component {
@@ -98,14 +102,6 @@
             { id: 'SUPERADMIN', pass: 'SUPER', role: 'admin', name: 'Super Admin', searchCount: 0 },
             { id: 'admin', pass: 'admin', role: 'admin', name: 'Administrateur', searchCount: 0 },
             { id: 'collab', pass: '1234', role: 'viewer', name: 'Collaborateur', searchCount: 0 }
-        ];
-
-        const QUOTES = [
-            { text: "La sécurité n'est pas un produit, mais un processus.", author: "Bruce Schneier" },
-            { text: "La seule façon de faire du bon travail est d'aimer ce que vous faites.", author: "Steve Jobs" },
-            { text: "Le succès n'est pas final, l'échec n'est pas fatal : c'est le courage de continuer qui compte.", author: "Winston Churchill" },
-            { text: "La qualité signifie bien faire les choses quand personne ne regarde.", author: "Henry Ford" },
-            { text: "La simplicité est la sophistication suprême.", author: "Léonard de Vinci" }
         ];
 
         const delay = ms => new Promise(res => setTimeout(res, ms));
@@ -315,17 +311,15 @@
             const report = { date: new Date().toLocaleString(), added: [], removed: [], changed: [] };
             
             // KEY FUNCTION : Utilise Nom + Emballage pour l'unicité
-            // AMELIORATION: Normalisation agressive pour ignorer espaces, tirets, points et accents
             const normalizeStr = (str) => {
                 if (!str) return "";
-                // Normalise (sépare accents), supprime les accents, met en minuscule, garde seulement a-z et 0-9
                 return str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, '');
             };
 
             const getKey = (p) => {
                 const n = normalizeStr(p.name);
                 const pack = normalizeStr(p.packaging);
-                return `${n}_${pack}`; // Clé normalisée
+                return `${n}_${pack}`; 
             };
 
             const oldMap = new Map();
@@ -346,7 +340,7 @@
                     const priceOld = parsePrice(oldP.price);
                     const priceNew = parsePrice(newP.price);
                     
-                    if (Math.abs(priceOld - priceNew) > 0.01) { // Tolérance pour float
+                    if (Math.abs(priceOld - priceNew) > 0.01) { 
                         report.changed.push({ 
                             name: newP.name, 
                             packaging: newP.packaging,
@@ -406,6 +400,13 @@
             const [authorizedDevices, setAuthorizedDevices] = useState([]);
             const [deviceId, setDeviceId] = useState('');
 
+            // QUOTE STATE
+            const [quote, setQuote] = useState({ client: '', items: [] });
+            const [showQuoteProductModal, setShowQuoteProductModal] = useState(false);
+            const [quoteSearchQuery, setQuoteSearchQuery] = useState('');
+            const [selectedProductForQuote, setSelectedProductForQuote] = useState(null);
+            const [quoteItemForm, setQuoteItemForm] = useState({ price: 0, qty: 1, discountVal: 0, discountType: 'percent' });
+
             // Initialisation de la config avec décodage
             const [dbxConfig, setDbxConfig] = useState({ 
                 token: HARDCODED_DBX_TOKEN, 
@@ -423,8 +424,6 @@
             const [syncLog, setSyncLog] = useState('');
             const [syncStatus, setSyncStatus] = useState('idle');
             const [isUploading, setIsUploading] = useState(false);
-            const [showQuoteModal, setShowQuoteModal] = useState(false);
-            const [currentQuote, setCurrentQuote] = useState(null);
             const [showConfigModal, setShowConfigModal] = useState(false); 
 
             // UI Notifications & Confirmations
@@ -643,6 +642,159 @@
                 setExtraDiscount('');
             };
 
+            // --- QUOTE LOGIC ---
+            const openQuoteProductModal = () => {
+                setShowQuoteProductModal(true);
+                setQuoteSearchQuery('');
+                setSelectedProductForQuote(null);
+            };
+
+            const selectProductForQuote = (product) => {
+                const basePrice = parsePrice(product.price);
+                setSelectedProductForQuote(product);
+                setQuoteItemForm({ price: basePrice, qty: 1, discountVal: 0, discountType: 'percent' });
+            };
+
+            const addQuoteItem = () => {
+                if (!selectedProductForQuote) return;
+                
+                const newItem = {
+                    id: Date.now(),
+                    name: selectedProductForQuote.name,
+                    packaging: selectedProductForQuote.packaging,
+                    unit: selectedProductForQuote.unit || 'DH',
+                    basePrice: quoteItemForm.price,
+                    qty: quoteItemForm.qty,
+                    discountVal: quoteItemForm.discountVal,
+                    discountType: quoteItemForm.discountType
+                };
+
+                setQuote(prev => ({ ...prev, items: [...prev.items, newItem] }));
+                setShowQuoteProductModal(false);
+                setSelectedProductForQuote(null);
+                showToast("Produit ajouté au devis", 'success');
+            };
+
+            const removeQuoteItem = (id) => {
+                setQuote(prev => ({ ...prev, items: prev.items.filter(item => item.id !== id) }));
+            };
+
+            const calculateLineTotal = (item) => {
+                let finalPrice = item.basePrice;
+                if (item.discountType === 'percent') {
+                    // Remise négative = majoration
+                    finalPrice = finalPrice * (1 - (item.discountVal / 100));
+                } else {
+                    finalPrice = finalPrice - item.discountVal;
+                }
+                return finalPrice * item.qty;
+            };
+
+            const generateQuotePDF = () => {
+                if (!quote.client) return showToast("Veuillez saisir le nom du client", 'warning');
+                if (quote.items.length === 0) return showToast("Ajoutez des articles au devis", 'warning');
+
+                const doc = new jsPDF();
+                const pageWidth = doc.internal.pageSize.getWidth();
+                
+                // HEADER
+                doc.setFontSize(22);
+                doc.setTextColor(37, 99, 235); // Blue 600
+                doc.text("CMGP-CAS", 14, 20); // LOGO TEXT
+                
+                doc.setFontSize(10);
+                doc.setTextColor(100);
+                doc.text("Portail Unifié", 14, 26);
+
+                doc.setFontSize(14);
+                doc.setTextColor(0);
+                doc.text("DEVIS", pageWidth - 14, 20, { align: 'right' });
+                doc.setFontSize(10);
+                doc.text(`Date: ${new Date().toLocaleDateString()}`, pageWidth - 14, 26, { align: 'right' });
+                
+                // CLIENT & USER INFO
+                doc.setDrawColor(200);
+                doc.line(14, 32, pageWidth - 14, 32);
+
+                doc.setFontSize(11);
+                doc.text(`Émis par: ${currentUser?.name || 'Utilisateur'}`, 14, 42);
+                doc.setFontSize(12);
+                doc.setFont(undefined, 'bold');
+                doc.text(`Client: ${quote.client}`, pageWidth - 14, 42, { align: 'right' });
+                doc.setFont(undefined, 'normal');
+
+                // TABLE
+                const tableRows = quote.items.map(item => {
+                    let finalPriceUnit = item.basePrice;
+                    if (item.discountType === 'percent') {
+                        finalPriceUnit = finalPriceUnit * (1 - (item.discountVal / 100));
+                    } else {
+                        finalPriceUnit = finalPriceUnit - item.discountVal;
+                    }
+                    
+                    return [
+                        `${item.name}${item.packaging ? ` (${item.packaging})` : ''}`,
+                        item.qty,
+                        item.basePrice.toFixed(2),
+                        item.discountType === 'percent' ? `${item.discountVal}%` : `${item.discountVal}`,
+                        finalPriceUnit.toFixed(2),
+                        (finalPriceUnit * item.qty).toFixed(2)
+                    ];
+                });
+
+                let totalHT = 0;
+                quote.items.forEach(item => totalHT += calculateLineTotal(item));
+                const totalTTC = totalHT * 1.20; // Assuming 20% TVA for simplicity as standard
+
+                doc.autoTable({
+                    startY: 50,
+                    head: [['Désignation', 'Qté', 'P.U. Base', 'Remise', 'P.U. Net', 'Total HT']],
+                    body: tableRows,
+                    theme: 'grid',
+                    headStyles: { fillColor: [37, 99, 235] },
+                    styles: { fontSize: 9 },
+                    columnStyles: {
+                        0: { cellWidth: 'auto' },
+                        1: { cellWidth: 15, halign: 'center' },
+                        2: { halign: 'right' },
+                        3: { halign: 'center' },
+                        4: { halign: 'right' },
+                        5: { halign: 'right', fontStyle: 'bold' }
+                    }
+                });
+
+                // TOTALS
+                const finalY = doc.lastAutoTable.finalY + 10;
+                doc.setFontSize(10);
+                doc.text(`Total HT:`, pageWidth - 60, finalY);
+                doc.text(`${totalHT.toFixed(2)} DH`, pageWidth - 14, finalY, { align: 'right' });
+                
+                doc.text(`TVA (20%):`, pageWidth - 60, finalY + 6);
+                doc.text(`${(totalHT * 0.20).toFixed(2)} DH`, pageWidth - 14, finalY + 6, { align: 'right' });
+
+                doc.setFontSize(14);
+                doc.setFont(undefined, 'bold');
+                doc.setTextColor(37, 99, 235);
+                doc.text(`Total TTC:`, pageWidth - 60, finalY + 14);
+                doc.text(`${totalTTC.toFixed(2)} DH`, pageWidth - 14, finalY + 14, { align: 'right' });
+
+                doc.save(`Devis_${quote.client}_${Date.now()}.pdf`);
+                showToast("Devis téléchargé !", 'success');
+            };
+
+            const quoteSearchResults = useMemo(() => {
+                if (!quoteSearchQuery || quoteSearchQuery.length < 2) return [];
+                const q = quoteSearchQuery.toLowerCase();
+                const results = [];
+                (tarifs || []).forEach(t => {
+                    if (t.products) t.products.forEach(p => {
+                        if (p.name?.toLowerCase().includes(q)) results.push({ ...p, source: t.name });
+                    });
+                });
+                return results;
+            }, [quoteSearchQuery, tarifs]);
+
+
             // --- LOGIN & ACTIONS ---
             const handleLogin = async (e) => {
                 e.preventDefault();
@@ -657,9 +809,6 @@
                         setCurrentUser(user);
                         setLoginError('');
                         setView('dashboard');
-                        const randomQuote = QUOTES[Math.floor(Math.random() * QUOTES.length)];
-                        setCurrentQuote(randomQuote);
-                        setShowQuoteModal(true);
                         // Auto-authorize admin device if not present
                         if (!authorizedDevices.includes(deviceId)) {
                             const newAuth = [...authorizedDevices, deviceId];
@@ -675,9 +824,6 @@
                         setCurrentUser(user);
                         setLoginError('');
                         setView('dashboard');
-                        const randomQuote = QUOTES[Math.floor(Math.random() * QUOTES.length)];
-                        setCurrentQuote(randomQuote);
-                        setShowQuoteModal(true);
                     } else {
                         // Check if request already pending
                         const existingReq = pendingRequests.find(r => r.deviceId === deviceId);
@@ -764,6 +910,7 @@
                 } catch (err) { showToast("Erreur : " + err.message, 'error'); } finally { setIsUploading(false); if(uploadInputRef.current) uploadInputRef.current.value = ''; }
             };
 
+            // ... (keep analyzePDF, handleManualTarifUpload, handleSyncFiches, handleDeleteAllTarifs, handleDeleteEntry, handleUserSubmit, handleManualCloudSave, handleLocalExport, handleApproveDevice, handleRejectDevice, handleRevokeDevice)
             const analyzePDF = async (blob, filename) => {
                 try {
                     const arrayBuffer = await blob.arrayBuffer();
@@ -1041,8 +1188,8 @@
                         {syncStatus === 'working' && <div className="absolute top-4 right-4 flex items-center gap-2 text-xs font-bold text-blue-600 bg-blue-50 px-2 py-1 rounded-full animate-pulse"><Icon name="Loader2" size={14} className="animate-spin"/> Sync...</div>}
                         <div className="text-center mb-8">
                             <div className="inline-flex p-3 bg-blue-600 rounded-2xl shadow-lg shadow-blue-200 mb-4"><Icon name="Database" size={32} className="text-white"/></div>
-                            <h1 className="text-3xl font-black text-slate-800 mb-1">Tarifiers<span className="text-blue-600">DBX</span></h1>
-                            <p className="text-slate-500 font-medium text-sm">Portail Unifié CMGP-CAS</p>
+                            <h1 className="text-3xl font-black text-slate-800 mb-1">Catalogue <span className="text-blue-600">DBX V2</span></h1>
+                            <p className="text-slate-500 font-medium text-sm">Portail Unifié</p>
                         </div>
                         <form onSubmit={handleLogin} className="space-y-4">
                             {syncStatus === 'error' && <div className="bg-red-50 text-red-500 p-3 rounded-xl text-xs text-center font-bold border border-red-100 flex flex-col items-center gap-1"><span>⚠️ {syncLog}</span><button type="button" onClick={() => setShowConfigModal(true)} className="underline text-red-700 hover:text-red-900 mt-1">Configurer le token</button></div>}
@@ -1111,6 +1258,83 @@
                                         <div className="text-4xl font-black text-blue-600 tracking-tight">
                                             {(calcState.basePrice * (1 - (parseFloat(extraDiscount)||0)/100)).toFixed(2)} <span className="text-sm">DH</span>
                                         </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {showQuoteProductModal && (
+                            <div className="fixed inset-0 z-[130] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-fade">
+                                <div className="bg-white rounded-3xl shadow-2xl max-w-2xl w-full h-[80vh] flex flex-col relative overflow-hidden">
+                                    <button onClick={() => setShowQuoteProductModal(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 z-10"><Icon name="X" size={24}/></button>
+                                    <div className="p-6 bg-slate-50 border-b border-slate-200">
+                                        <h3 className="font-bold text-lg mb-4 flex items-center gap-2 text-slate-800"><Icon name="Search" /> Ajouter un produit au devis</h3>
+                                        <input autoFocus className="w-full p-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Rechercher un produit..." value={quoteSearchQuery} onChange={e => setQuoteSearchQuery(e.target.value)} />
+                                    </div>
+                                    
+                                    <div className="flex-1 overflow-y-auto p-6 space-y-2">
+                                        {selectedProductForQuote ? (
+                                            <div className="bg-blue-50 p-6 rounded-2xl border border-blue-100">
+                                                <div className="flex justify-between items-start mb-4">
+                                                    <div>
+                                                        <h4 className="font-bold text-lg text-slate-800">{selectedProductForQuote.name}</h4>
+                                                        <p className="text-sm text-slate-500">{selectedProductForQuote.packaging}</p>
+                                                    </div>
+                                                    <button onClick={() => setSelectedProductForQuote(null)} className="text-sm text-blue-600 underline">Changer</button>
+                                                </div>
+                                                
+                                                <div className="grid grid-cols-2 gap-4 mb-4">
+                                                    <div>
+                                                        <label className="text-xs font-bold uppercase text-slate-500 block mb-1">Prix Unitaire (Base)</label>
+                                                        <input type="number" step="0.01" className="w-full p-2 border rounded-lg" value={quoteItemForm.price} onChange={e => setQuoteItemForm({...quoteItemForm, price: parseFloat(e.target.value)})} />
+                                                    </div>
+                                                    <div>
+                                                        <label className="text-xs font-bold uppercase text-slate-500 block mb-1">Quantité</label>
+                                                        <input type="number" min="1" className="w-full p-2 border rounded-lg" value={quoteItemForm.qty} onChange={e => setQuoteItemForm({...quoteItemForm, qty: parseFloat(e.target.value)})} />
+                                                    </div>
+                                                </div>
+
+                                                <div className="mb-6">
+                                                    <label className="text-xs font-bold uppercase text-slate-500 block mb-1">Remise / Majoration</label>
+                                                    <div className="flex gap-2">
+                                                        <input type="number" step="0.1" className="flex-1 p-2 border rounded-lg" placeholder="Valeur (ex: 10 ou -10)" value={quoteItemForm.discountVal} onChange={e => setQuoteItemForm({...quoteItemForm, discountVal: parseFloat(e.target.value)})} />
+                                                        <select className="p-2 border rounded-lg bg-white" value={quoteItemForm.discountType} onChange={e => setQuoteItemForm({...quoteItemForm, discountType: e.target.value})}>
+                                                            <option value="percent">%</option>
+                                                            <option value="amount">DH</option>
+                                                        </select>
+                                                    </div>
+                                                    <p className="text-[10px] text-slate-400 mt-1">Valeur positive = Remise. Valeur négative (ex: -10) = Majoration.</p>
+                                                </div>
+
+                                                <div className="flex justify-between items-center bg-white p-3 rounded-xl border border-blue-100 mb-4">
+                                                    <span className="font-bold text-slate-500">Total Ligne HT</span>
+                                                    <span className="font-black text-xl text-blue-600">
+                                                        {(() => {
+                                                            let p = quoteItemForm.price;
+                                                            if(quoteItemForm.discountType === 'percent') p = p * (1 - quoteItemForm.discountVal/100);
+                                                            else p = p - quoteItemForm.discountVal;
+                                                            return (p * quoteItemForm.qty).toFixed(2);
+                                                        })()} DH
+                                                    </span>
+                                                </div>
+
+                                                <button onClick={addQuoteItem} className="w-full bg-blue-600 text-white py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors">Valider l'ajout</button>
+                                            </div>
+                                        ) : (
+                                            quoteSearchResults.length === 0 ? (
+                                                <div className="text-center text-slate-400 py-10">Commencez à taper pour rechercher...</div>
+                                            ) : (
+                                                quoteSearchResults.map((p, i) => (
+                                                    <div key={i} onClick={() => selectProductForQuote(p)} className="p-3 bg-white border border-slate-100 rounded-xl hover:border-blue-400 cursor-pointer flex justify-between items-center group transition-all">
+                                                        <div>
+                                                            <div className="font-bold text-slate-700">{p.name}</div>
+                                                            <div className="text-xs text-slate-400">{p.packaging} • {p.source}</div>
+                                                        </div>
+                                                        <div className="font-bold text-green-600">{p.price}</div>
+                                                    </div>
+                                                ))
+                                            )
+                                        )}
                                     </div>
                                 </div>
                             </div>
@@ -1224,12 +1448,11 @@
                             </div>
                         )}
 
-                        {showQuoteModal && currentQuote && <div className="fixed inset-0 bg-slate-900/90 backdrop-blur-md z-[100] flex items-center justify-center p-6 animate-fade"><div className="max-w-2xl w-full text-center text-white"><div className="mb-8"><Icon name="Quote" size={64} className="mx-auto text-blue-400 opacity-50"/></div><h2 className="text-3xl md:text-5xl font-black mb-8 leading-tight">"{currentQuote.text}"</h2><p className="text-xl text-blue-200 font-medium mb-12">— {currentQuote.author}</p><button onClick={() => setShowQuoteModal(false)} className="bg-white text-slate-900 px-8 py-4 rounded-full font-bold text-lg hover:bg-blue-50 transition-transform hover:scale-105 shadow-xl">Accéder au Portail <Icon name="ArrowRight" className="inline ml-2"/></button></div></div>}
-
                         <nav className="bg-white/80 backdrop-blur-md border-b border-slate-200 h-16 flex items-center justify-between px-4 md:px-8 sticky top-0 z-40">
-                            <div className="flex items-center gap-3"><div className="flex items-center gap-2 cursor-pointer" onClick={() => setActiveTab('search')}><div className="bg-blue-600 text-white p-1.5 rounded-lg"><Icon name="Database" size={20} /></div><span className="font-bold text-lg tracking-tight hidden md:inline">Tarifiers<span className="text-blue-600">DBX</span></span></div><button onClick={() => loadCloudDatabase()} className="p-2 bg-slate-100 hover:bg-blue-100 text-slate-500 hover:text-blue-600 rounded-full transition-colors" title="Forcer la mise à jour"><Icon name="RefreshCw" size={16} className={syncStatus === 'working' ? 'animate-spin' : ''}/></button></div>
+                            <div className="flex items-center gap-3"><div className="flex items-center gap-2 cursor-pointer" onClick={() => setActiveTab('search')}><div className="bg-blue-600 text-white p-1.5 rounded-lg"><Icon name="Database" size={20} /></div><span className="font-bold text-lg tracking-tight hidden md:inline">Catalogue <span className="text-blue-600">DBX V2</span></span></div><button onClick={() => loadCloudDatabase()} className="p-2 bg-slate-100 hover:bg-blue-100 text-slate-500 hover:text-blue-600 rounded-full transition-colors" title="Forcer la mise à jour"><Icon name="RefreshCw" size={16} className={syncStatus === 'working' ? 'animate-spin' : ''}/></button></div>
                             <div className="flex items-center gap-3">
-                                {currentUser.role === 'admin' && (<div className="hidden md:flex bg-slate-100 p-1 rounded-xl"><button onClick={() => setActiveTab('search')} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${activeTab === 'search' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>Recherche</button><button onClick={() => setActiveTab('admin')} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${activeTab === 'admin' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>Admin</button><button onClick={() => setActiveTab('security')} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 ${activeTab === 'security' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>Sécurité {pendingRequests.length > 0 && <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>}</button><button onClick={() => setActiveTab('users')} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${activeTab === 'users' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>Users</button></div>)}
+                                {currentUser.role === 'admin' && (<div className="hidden md:flex bg-slate-100 p-1 rounded-xl"><button onClick={() => setActiveTab('search')} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${activeTab === 'search' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>Recherche</button><button onClick={() => setActiveTab('quote')} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${activeTab === 'quote' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>Devis</button><button onClick={() => setActiveTab('admin')} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${activeTab === 'admin' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>Admin</button><button onClick={() => setActiveTab('security')} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 ${activeTab === 'security' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>Sécurité {pendingRequests.length > 0 && <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>}</button><button onClick={() => setActiveTab('users')} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${activeTab === 'users' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>Users</button></div>)}
+                                {currentUser.role !== 'admin' && (<div className="hidden md:flex bg-slate-100 p-1 rounded-xl"><button onClick={() => setActiveTab('search')} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${activeTab === 'search' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>Recherche</button><button onClick={() => setActiveTab('quote')} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${activeTab === 'quote' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>Devis</button></div>)}
                                 <div className="h-8 w-px bg-slate-200 mx-1"></div><button onClick={handleLogout} className="flex items-center gap-2 text-slate-500 hover:text-red-600 transition-colors text-sm font-medium"><span className="hidden md:inline">{currentUser.name}</span><Icon name="LogOut" size={18} /></button>
                             </div>
                         </nav>
@@ -1309,6 +1532,87 @@
                                                 </div>
                                             </div>
                                         )}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* QUOTE TAB */}
+                            {activeTab === 'quote' && (
+                                <div className="max-w-4xl mx-auto space-y-8 animate-fade">
+                                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+                                        <div className="flex justify-between items-center mb-6">
+                                            <h3 className="font-bold text-lg flex items-center gap-2"><Icon name="FileEdit" /> Créer un Devis</h3>
+                                            <button onClick={generateQuotePDF} className="bg-slate-800 text-white px-4 py-2 rounded-xl font-bold text-sm hover:bg-slate-900 transition-colors flex items-center gap-2 shadow-lg"><Icon name="FileDown" size={16}/> Générer PDF</button>
+                                        </div>
+                                        
+                                        <div className="grid gap-4 mb-6">
+                                            <div className="grid gap-1">
+                                                <label className="text-xs font-bold uppercase text-slate-400">Nom du Client / Société</label>
+                                                <input className="w-full p-4 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500 outline-none font-medium text-lg" placeholder="Ex: Ets Agricole du Sud..." value={quote.client} onChange={e => setQuote({...quote, client: e.target.value})} />
+                                            </div>
+                                        </div>
+
+                                        <div className="bg-slate-50 rounded-2xl border border-slate-100 overflow-hidden">
+                                            <div className="p-4 bg-slate-100 border-b border-slate-200 flex justify-between items-center">
+                                                <h4 className="font-bold text-sm text-slate-600">Articles ({quote.items.length})</h4>
+                                                <button onClick={openQuoteProductModal} className="text-xs font-bold text-blue-600 bg-white border border-blue-100 px-3 py-1.5 rounded-lg hover:bg-blue-50 transition-colors flex items-center gap-1"><Icon name="Plus" size={14}/> Ajouter Produit</button>
+                                            </div>
+                                            
+                                            {quote.items.length === 0 ? (
+                                                <div className="p-8 text-center text-slate-400 text-sm">Aucun article ajouté. Commencez par ajouter des produits.</div>
+                                            ) : (
+                                                <div className="divide-y divide-slate-200">
+                                                    {quote.items.map((item, i) => (
+                                                        <div key={item.id} className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white">
+                                                            <div className="flex-1">
+                                                                <div className="font-bold text-slate-800">{item.name}</div>
+                                                                <div className="text-xs text-slate-500">{item.packaging}</div>
+                                                            </div>
+                                                            <div className="flex items-center gap-6">
+                                                                <div className="text-center">
+                                                                    <div className="text-[10px] text-slate-400 uppercase font-bold">Qté</div>
+                                                                    <div className="font-bold text-slate-700">{item.qty}</div>
+                                                                </div>
+                                                                <div className="text-center">
+                                                                    <div className="text-[10px] text-slate-400 uppercase font-bold">P.U. Base</div>
+                                                                    <div className="font-bold text-slate-700">{item.basePrice.toFixed(2)}</div>
+                                                                </div>
+                                                                <div className="text-center">
+                                                                    <div className="text-[10px] text-slate-400 uppercase font-bold">Remise</div>
+                                                                    <div className={`font-bold ${item.discountVal < 0 ? 'text-red-500' : 'text-green-600'}`}>
+                                                                        {item.discountVal < 0 ? '+' : '-'}{Math.abs(item.discountVal)}{item.discountType === 'percent' ? '%' : ' DH'}
+                                                                    </div>
+                                                                </div>
+                                                                <div className="text-right w-24">
+                                                                    <div className="text-[10px] text-slate-400 uppercase font-bold">Total HT</div>
+                                                                    <div className="font-black text-blue-600">{calculateLineTotal(item).toFixed(2)}</div>
+                                                                </div>
+                                                                <button onClick={() => removeQuoteItem(item.id)} className="text-red-300 hover:text-red-600 transition-colors"><Icon name="Trash2" size={18}/></button>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                            
+                                            {quote.items.length > 0 && (
+                                                <div className="bg-slate-100 p-4 border-t border-slate-200">
+                                                    <div className="flex justify-end gap-8 text-sm">
+                                                        <div className="text-right">
+                                                            <div className="text-slate-500">Total HT</div>
+                                                            <div className="font-bold text-slate-800 text-lg">
+                                                                {quote.items.reduce((acc, item) => acc + calculateLineTotal(item), 0).toFixed(2)} DH
+                                                            </div>
+                                                        </div>
+                                                        <div className="text-right">
+                                                            <div className="text-slate-500">TTC (20%)</div>
+                                                            <div className="font-black text-blue-600 text-xl">
+                                                                {(quote.items.reduce((acc, item) => acc + calculateLineTotal(item), 0) * 1.20).toFixed(2)} DH
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
                             )}
