@@ -882,7 +882,7 @@
             const flattenedProducts = useMemo(() => {
                 const all = [];
                 (tarifs || []).forEach(t => {
-                    if (t.products) {
+                    if (t && t.products && Array.isArray(t.products)) {
                         t.products.forEach(p => {
                             all.push({
                                 ...p,
@@ -1598,23 +1598,6 @@
                             </div>
                         )}
 
-                        {viewingFile && (
-                            <div className="fixed inset-0 z-[100] bg-slate-900 flex flex-col animate-fade">
-                                <div className="flex items-center justify-between p-4 bg-slate-900 text-white border-b border-slate-700 shadow-xl z-20">
-                                    <h3 className="font-bold truncate max-w-md flex items-center gap-2 text-sm md:text-base"><Icon name="FileText" size={18} className="text-blue-400"/> {viewingFile.name}</h3>
-                                    <div className="flex gap-2 items-center">
-                                        {viewingFile.type === 'pdf' && pdfState.numPages > 1 && (<div className="hidden md:flex bg-slate-800 rounded-lg p-1 mr-2 items-center"><button onClick={() => changePage(-1)} className="p-1 hover:text-blue-400"><Icon name="ChevronLeft"/></button><span className="px-2 text-xs font-mono">{pdfState.pageNum} / {pdfState.numPages}</span><button onClick={() => changePage(1)} className="p-1 hover:text-blue-400"><Icon name="ChevronRight"/></button></div>)}
-                                        {viewingFile.type === 'pdf' && (<div className="hidden md:flex bg-slate-800 rounded-lg p-1 mr-2"><button onClick={() => zoomPdf(-0.2)} className="p-1 hover:text-blue-400"><Icon name="Minus" size={16}/></button><button onClick={() => zoomPdf(0.2)} className="p-1 hover:text-blue-400"><Icon name="Plus" size={16}/></button></div>)}
-                                        <a href={viewingFile.url} download={viewingFile.name} className="p-2 bg-slate-800 hover:bg-blue-600 rounded-lg text-slate-300 hover:text-white transition-colors" title="Sauvegarder"><Icon name="Download" size={18}/></a>
-                                        <button onClick={closeViewer} className="p-2 bg-red-600 hover:bg-red-700 rounded-lg text-white transition-colors" title="Fermer"><Icon name="X" size={18}/></button>
-                                    </div>
-                                </div>
-                                <div className="flex-1 relative bg-gray-800 overflow-auto flex justify-center p-4">
-                                    {viewingFile.type === 'pdf' ? (<div className="relative shadow-2xl"><canvas ref={canvasRef} className="max-w-full h-auto bg-white"/>{pdfState.numPages > 1 && (<div className="md:hidden fixed bottom-6 left-1/2 -translate-x-1/2 bg-slate-900/90 text-white px-4 py-2 rounded-full flex gap-4 items-center shadow-xl backdrop-blur-sm border border-slate-700"><button onClick={() => changePage(-1)}><Icon name="ChevronLeft"/></button><span className="text-xs font-bold">{pdfState.pageNum}/{pdfState.numPages}</span><button onClick={() => changePage(1)}><Icon name="ChevronRight"/></button></div>)}</div>) : (<img src={viewingFile.url} alt="Visuel" className="max-w-full max-h-full object-contain" />)}
-                                </div>
-                            </div>
-                        )}
-
                         <nav className="bg-white/80 backdrop-blur-md border-b border-slate-200 h-16 flex items-center justify-between px-4 md:px-8 sticky top-0 z-40">
                             <div className="flex items-center gap-3"><div className="flex items-center gap-2 cursor-pointer" onClick={() => setActiveTab('search')}><div className="bg-blue-600 text-white p-1.5 rounded-lg"><Icon name="Database" size={20} /></div><span className="font-bold text-lg tracking-tight hidden md:inline">Catalogue <span className="text-blue-600">DBX V2</span></span></div><button onClick={() => loadCloudDatabase()} className="p-2 bg-slate-100 hover:bg-blue-100 text-slate-500 hover:text-blue-600 rounded-full transition-colors" title="Forcer la mise à jour"><Icon name="RefreshCw" size={16} className={syncStatus === 'working' ? 'animate-spin' : ''}/></button></div>
                             <div className="flex items-center gap-3">
@@ -1753,24 +1736,152 @@
                                 </div>
                             )}
 
+                            {/* QUOTE TAB */}
+                            {activeTab === 'quote' && (
+                                <div className="max-w-4xl mx-auto space-y-8 animate-fade">
+                                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+                                        <div className="flex justify-between items-center mb-6">
+                                            <h3 className="font-bold text-lg flex items-center gap-2"><Icon name="FileEdit" /> Créer un Devis</h3>
+                                            <button onClick={generateQuotePDF} className="bg-slate-800 text-white px-4 py-2 rounded-xl font-bold text-sm hover:bg-slate-900 transition-colors flex items-center gap-2 shadow-lg"><Icon name="FileDown" size={16}/> Générer PDF</button>
+                                        </div>
+                                        
+                                        <div className="grid gap-4 mb-6">
+                                            <div className="grid gap-1">
+                                                <label className="text-xs font-bold uppercase text-slate-400">Nom du Client / Société</label>
+                                                <input className="w-full p-4 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500 outline-none font-medium text-lg" placeholder="Ex: Ets Agricole du Sud..." value={quote.client} onChange={e => setQuote({...quote, client: e.target.value})} />
+                                            </div>
+                                        </div>
+
+                                        <div className="bg-slate-50 rounded-2xl border border-slate-100 overflow-hidden">
+                                            <div className="p-4 bg-slate-100 border-b border-slate-200 flex justify-between items-center">
+                                                <h4 className="font-bold text-sm text-slate-600">Articles ({(quote?.items || []).length})</h4>
+                                                <button onClick={openQuoteProductModal} className="text-xs font-bold text-blue-600 bg-white border border-blue-100 px-3 py-1.5 rounded-lg hover:bg-blue-50 transition-colors flex items-center gap-1"><Icon name="Plus" size={14}/> Ajouter Produit</button>
+                                            </div>
+                                            
+                                            {(quote?.items || []).length === 0 ? (
+                                                <div className="p-8 text-center text-slate-400 text-sm">Aucun article ajouté. Commencez par ajouter des produits.</div>
+                                            ) : (
+                                                <div className="divide-y divide-slate-200">
+                                                    {(quote?.items || []).map((item, i) => (
+                                                        item && (
+                                                            <div key={item.id} className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white">
+                                                                <div className="flex-1">
+                                                                    <div className="font-bold text-slate-800 flex items-center gap-2">
+                                                                        {item.name}
+                                                                        {/* NOUVEAU : Badge EXO ou TTC */}
+                                                                        {!item.isTaxable ? (
+                                                                            <span className="bg-green-100 text-green-700 text-[10px] px-1.5 py-0.5 rounded font-bold uppercase">EXO</span>
+                                                                        ) : (
+                                                                            <span className="bg-slate-100 text-slate-500 text-[10px] px-1.5 py-0.5 rounded font-bold uppercase">TVA 20%</span>
+                                                                        )}
+                                                                    </div>
+                                                                    <div className="text-xs text-slate-500">{item.packaging}</div>
+                                                                </div>
+                                                                <div className="flex items-center gap-6">
+                                                                    <div className="text-center">
+                                                                        <div className="text-[10px] text-slate-400 uppercase font-bold">Qté</div>
+                                                                        <div className="font-bold text-slate-700">{item.qty}</div>
+                                                                    </div>
+                                                                    <div className="text-center">
+                                                                        <div className="text-[10px] text-slate-400 uppercase font-bold">P.U. Base</div>
+                                                                        <div className="font-bold text-slate-700">{item.basePrice.toFixed(2)}</div>
+                                                                    </div>
+                                                                    <div className="text-center">
+                                                                        <div className="text-[10px] text-slate-400 uppercase font-bold">Remise</div>
+                                                                        <div className={`font-bold ${item.discountVal < 0 ? 'text-red-500' : 'text-green-600'}`}>
+                                                                            {item.discountVal < 0 ? '+' : '-'}{Math.abs(item.discountVal)}{item.discountType === 'percent' ? '%' : ' DH'}
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="text-right w-24">
+                                                                        <div className="text-[10px] text-slate-400 uppercase font-bold">Total HT</div>
+                                                                        <div className="font-black text-blue-600">{calculateLineTotal(item).toFixed(2)}</div>
+                                                                    </div>
+                                                                    <button onClick={() => removeQuoteItem(item.id)} className="text-red-300 hover:text-red-600 transition-colors"><Icon name="Trash2" size={18}/></button>
+                                                                </div>
+                                                            </div>
+                                                        )
+                                                    ))}
+                                                </div>
+                                            )}
+                                            
+                                            {(quote?.items || []).length > 0 && (
+                                                <div className="bg-slate-100 p-4 border-t border-slate-200">
+                                                    <div className="flex justify-end gap-8 text-sm">
+                                                        <div className="text-right">
+                                                            <div className="text-slate-500">Total HT</div>
+                                                            <div className="font-bold text-slate-800 text-lg">
+                                                                {(quote?.items || []).reduce((acc, item) => acc + calculateLineTotal(item), 0).toFixed(2)} DH
+                                                            </div>
+                                                        </div>
+                                                        <div className="text-right">
+                                                            <div className="text-slate-500">TTC</div>
+                                                            <div className="font-black text-blue-600 text-xl">
+                                                                {(() => {
+                                                                    let totalHT = 0;
+                                                                    let totalTVA = 0;
+                                                                    (quote?.items || []).forEach(item => {
+                                                                        const line = calculateLineTotal(item);
+                                                                        totalHT += line;
+                                                                        if(item.isTaxable) totalTVA += line * 0.20;
+                                                                    });
+                                                                    return (totalHT + totalTVA).toFixed(2);
+                                                                })()} DH
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* ADMIN TAB */}
+                            {activeTab === 'admin' && currentUser.role === 'admin' && (
+                                <div className="animate-fade grid grid-cols-1 lg:grid-cols-3 gap-8">
+                                    <div className="lg:col-span-1 space-y-6">
+                                        <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+                                            <h3 className="font-bold text-lg mb-4 flex items-center gap-2 text-slate-800"><Icon name="Settings" /> Paramètres</h3>
+                                            <div className="space-y-4">
+                                                <div className="grid gap-1"><label className="text-[10px] font-bold uppercase text-slate-400">Token Dropbox</label><input type="password" value={dbxConfig.token} onChange={e => setDbxConfig({...dbxConfig, token: e.target.value})} className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono" /></div>
+                                                <div className="bg-blue-50 p-3 rounded-xl border border-blue-100"><label className="text-[10px] font-bold uppercase text-blue-700 block mb-2">Connexion Permanente (OAuth)</label><div className="grid gap-1 mb-2"><input value={dbxConfig.appKey} onChange={e => setDbxConfig({...dbxConfig, appKey: e.target.value})} className="p-2 bg-white border border-blue-200 rounded text-xs" placeholder="App Key"/></div><div className="grid gap-1 mb-2"><input type="password" value={dbxConfig.appSecret} onChange={e => setDbxConfig({...dbxConfig, appSecret: e.target.value})} className="p-2 bg-white border border-blue-200 rounded text-xs" placeholder="App Secret"/></div>{dbxConfig.appKey && (<a href={`https://www.dropbox.com/oauth2/authorize?client_id=${dbxConfig.appKey}&token_access_type=offline&response_type=code`} target="_blank" className="block w-full text-center bg-blue-600 text-white py-2 rounded-lg text-xs font-bold mb-2 hover:bg-blue-700">1. Autoriser l'App</a>)}<div className="flex gap-2"><input value={authCode} onChange={e => setAuthCode(e.target.value)} className="flex-1 p-2 border rounded-lg text-xs" placeholder="2. Coller le Code"/><button onClick={handleExchangeCode} disabled={syncStatus === 'working'} className="bg-green-600 text-white px-3 rounded-lg hover:bg-green-700 font-bold text-xs">Valider</button></div>{dbxConfig.refreshToken && (<div className="mt-3 bg-white p-2 rounded border border-green-200"><div className="text-[10px] text-green-600 font-bold mb-1">✅ Token Permanent Actif</div><label className="text-[9px] font-bold uppercase text-slate-400 block mb-1">REFRESH TOKEN (A COPIER DANS LE CODE)</label><div className="flex items-center gap-2"><input readOnly value={dbxConfig.refreshToken} className="flex-1 p-1 bg-slate-50 border border-slate-200 rounded text-[10px] font-mono text-slate-500 select-all" onClick={e => e.target.select()}/><button onClick={() => { copyToClipboard(dbxConfig.refreshToken); showToast("Copié !", 'success'); }} className="p-1 bg-slate-100 hover:bg-slate-200 rounded text-slate-500" title="Copier"><Icon name="Copy" size={12}/></button></div></div>)}</div>
+                                                <div className="grid gap-1"><label className="text-[10px] font-bold uppercase text-slate-400">Clé Gemini</label><input type="password" value={dbxConfig.geminiKey} onChange={e => setDbxConfig({...dbxConfig, geminiKey: e.target.value})} className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono" /></div><div className="grid gap-1"><label className="text-[10px] font-bold uppercase text-slate-400">Dossier Tarifs</label><input value={dbxConfig.pathTarifs} onChange={e => setDbxConfig({...dbxConfig, pathTarifs: e.target.value})} className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs" /></div><div className="grid gap-1"><label className="text-[10px] font-bold uppercase text-slate-400">Dossier Fiches</label><input value={dbxConfig.pathFT} onChange={e => setDbxConfig({...dbxConfig, pathFT: e.target.value})} className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs" /></div>
+                                                <div className="pt-4 mt-4 border-t border-slate-100 flex flex-col gap-2"><button onClick={handleManualCloudSave} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl text-xs flex items-center justify-center gap-2 transition-colors shadow-sm"><Icon name="CloudUpload" size={14}/> Publier la Base sur le Cloud (MàJ)</button><button onClick={handleLocalExport} className="w-full bg-slate-100 hover:bg-slate-200 text-slate-500 font-bold py-2 rounded-xl text-xs flex items-center justify-center gap-2 transition-colors"><Icon name="HardDriveDownload" size={14}/> Télécharger Backup Local (Secours)</button></div>
+                                            </div>
+                                        </div>
+                                        <div className="bg-slate-900 text-green-400 p-5 rounded-3xl font-mono text-xs h-60 overflow-y-auto shadow-inner"><div className="opacity-50 border-b border-green-800 pb-2 mb-2">System Logs</div><div className="whitespace-pre-wrap">{syncLog || "Prêt."}</div></div>
+                                    </div>
+                                    {showAdminUploadModal && (<div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4"><div className="bg-white p-8 rounded-3xl shadow-2xl max-w-md w-full animate-fade relative"><button onClick={() => setShowAdminUploadModal(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><Icon name="X"/></button><div className="mb-6"><div className="inline-flex bg-blue-100 p-3 rounded-full text-blue-600 mb-3"><Icon name="FilePlus" size={24}/></div><h2 className="text-xl font-bold">Gestion Tarifs</h2><p className="text-sm text-slate-500">Ajouter ou remplacer un catalogue</p></div><form onSubmit={handleManualTarifUpload} className="space-y-4"><div className="flex bg-slate-50 p-1 rounded-xl"><button type="button" onClick={() => setAdminUploadMode('new')} className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${adminUploadMode === 'new' ? 'bg-white shadow text-blue-600' : 'text-slate-400'}`}>Nouveau</button><button type="button" onClick={() => setAdminUploadMode('update')} className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${adminUploadMode === 'update' ? 'bg-white shadow text-blue-600' : 'text-slate-400'}`}>Mise à jour</button></div>{adminUploadMode === 'update' && (<div><label className="text-xs font-bold text-slate-500 uppercase mb-1 block">Tarif à remplacer</label><select className="w-full p-3 border rounded-xl text-sm bg-white" required value={targetTarifId} onChange={e => setTargetTarifId(e.target.value)}><option value="">-- Choisir --</option>{(tarifs || []).map(t => t && <option key={t.id} value={t.id}>{t.name}</option>)}</select></div>)}<div><label className="text-xs font-bold text-slate-500 uppercase mb-1 block">Fichier PDF</label><input type="file" accept="application/pdf" required ref={adminFileInputRef} className="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"/></div><div><label className="text-xs font-bold text-slate-500 uppercase mb-1 block">Remise T4 (%)</label><input type="number" min="0" max="100" step="0.1" value={t4Value} onChange={e => setT4Value(e.target.value)} className="w-full p-3 border rounded-xl text-sm bg-slate-50 font-mono text-orange-600 font-bold" placeholder="0.0"/><p className="text-[10px] text-slate-400 mt-1">Sera déduit du prix TTC ou EXO pour l'affichage.</p></div><button disabled={syncStatus === 'working'} className="w-full bg-slate-800 text-white py-3 rounded-xl font-bold mt-2 hover:bg-slate-900 disabled:opacity-50 flex items-center justify-center gap-2">{syncStatus === 'working' ? <Icon name="Loader2" className="animate-spin"/> : <Icon name="UploadCloud"/>} Valider</button></form></div></div>)}
+                                    <div className="lg:col-span-2 bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden flex flex-col h-[600px]"><div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50"><h3 className="font-bold text-lg text-slate-800">Indexation</h3><div className="flex gap-2"><button onClick={handleDeleteAllTarifs} className="bg-red-50 hover:bg-red-100 text-red-600 px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1 transition-colors"><Icon name="Trash2" size={14}/> Tout Supprimer</button><button onClick={() => { setAdminUploadMode('new'); setShowAdminUploadModal(true); }} className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl font-bold text-sm flex items-center gap-2 shadow-lg shadow-indigo-200 transition-all active:scale-95"><Icon name="Plus"/> Gestion Tarifs</button><button onClick={() => handleSyncFiches()} disabled={syncStatus === 'working'} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl font-bold text-sm flex items-center gap-2 shadow-lg shadow-blue-200 transition-all active:scale-95 disabled:opacity-50"><Icon name={syncStatus === 'working' ? "Loader2" : "RefreshCw"} className={syncStatus === 'working' ? "animate-spin" : ""}/> Scan/Sync Fiches</button></div></div><div className="flex-1 overflow-auto p-0"><table className="w-full text-sm text-left"><thead className="bg-white sticky top-0 shadow-sm text-slate-500 font-bold text-[10px] uppercase"><tr><th className="p-4">Fichier</th><th className="p-4">Type</th><th className="p-4 text-center">Info</th><th className="p-4 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-50">{(tarifs || []).map(t => t && (<tr key={t.id} className="hover:bg-blue-50/30 group"><td className="p-4 font-bold text-slate-700">{t.name}</td><td className="p-4"><span className="bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-bold">TARIF</span></td><td className="p-4 text-center"><div className="text-blue-600 font-bold">{(t.products || []).length} produits</div>{t.t4_percentage > 0 && <div className="text-xs text-orange-500 font-bold">T4: -{t.t4_percentage}%</div>}</td><td className="p-4 text-right"><div className="flex justify-end gap-2">{t.report && <button onClick={() => setViewingReport(t.report)} className="p-2 text-orange-500 hover:text-orange-700 bg-orange-50 rounded-lg" title="Voir Rapport Fluctuation"><Icon name="TrendingUp" size={16}/></button>}<button onClick={() => handleDeleteEntry('tarif', t.id, t.name)} className="text-slate-300 hover:text-red-500 transition-colors p-2" title="Supprimer"><Icon name="Trash2" size={16}/></button></div></td></tr>))}{(fiches || []).map(f => f && (<tr key={f.id} className="hover:bg-indigo-50/30 group"><td className="p-4 font-bold text-slate-700">{f.name}</td><td className="p-4"><span className="bg-indigo-100 text-indigo-700 px-2 py-1 rounded text-xs font-bold">FICHE</span></td><td className="p-4 text-center text-slate-400">PDF</td><td className="p-4 text-right"><button onClick={() => handleDeleteEntry('fiche', f.id, f.name)} className="text-slate-300 hover:text-red-500 transition-colors p-2" title="Supprimer"><Icon name="Trash2" size={16}/></button></td></tr>))}</tbody></table></div></div></div>
+                            )}
+
                             {/* SECURITY TAB */}
                             {activeTab === 'security' && currentUser.role === 'admin' && (
                                 <div className="max-w-4xl mx-auto space-y-8 animate-fade">
                                     <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
-                                        <h3 className="font-bold text-lg mb-6 flex items-center gap-2"><Icon name="PlusCircle" /> Ajouter un appareil manuellement</h3>
-                                        <div className="flex flex-col md:flex-row gap-4 bg-slate-50 p-4 rounded-xl border border-slate-200">
-                                            <div className="flex-1">
-                                                <label className="text-xs font-bold uppercase text-slate-400 block mb-1">ID Appareil (Reçu du collaborateur)</label>
-                                                <input value={manualAddId} onChange={e => setManualAddId(e.target.value)} className="w-full p-3 border rounded-xl text-sm font-mono" placeholder="dev_..." />
+                                        <h3 className="font-bold text-lg mb-6 flex items-center gap-2"><Icon name="Shield" /> Demandes d'autorisation ({(pendingRequests || []).length})</h3>
+                                        {(!pendingRequests || pendingRequests.length === 0) ? (
+                                            <div className="text-center py-8 text-slate-400 italic text-sm">Aucune demande en attente.</div>
+                                        ) : (
+                                            <div className="space-y-4">
+                                                {(pendingRequests || []).map((req, i) => (
+                                                    <div key={i} className="flex flex-col md:flex-row items-center justify-between bg-orange-50 p-4 rounded-2xl border border-orange-100 gap-4">
+                                                        <div className="flex items-center gap-4">
+                                                            <div className="w-10 h-10 bg-orange-200 text-orange-700 rounded-full flex items-center justify-center font-bold"><Icon name="User"/></div>
+                                                            <div>
+                                                                <div className="font-bold text-slate-800">{req.user} <span className="text-xs font-normal text-slate-500">({req.login})</span></div>
+                                                                <div className="text-xs font-mono text-slate-500 bg-white px-2 py-1 rounded border border-orange-200 mt-1 max-w-[250px] truncate" title={req.deviceId}>{req.deviceId}</div>
+                                                                <div className="text-[10px] text-slate-400 mt-1">{req.date}</div>
+                                                            </div>
+                                                        </div>
+                                                        <div className="flex gap-2 w-full md:w-auto">
+                                                            <button onClick={() => handleRejectDevice(req)} className="flex-1 md:flex-none px-4 py-2 bg-white border border-slate-200 text-slate-600 hover:text-red-600 hover:bg-red-50 rounded-xl font-bold text-xs transition-colors">Rejeter</button>
+                                                            <button onClick={() => handleApproveDevice(req)} className="flex-1 md:flex-none px-4 py-2 bg-green-600 text-white hover:bg-green-700 rounded-xl font-bold text-xs shadow-lg shadow-green-200 transition-colors">Autoriser</button>
+                                                        </div>
+                                                    </div>
+                                                ))}
                                             </div>
-                                            <div className="flex-1">
-                                                <label className="text-xs font-bold uppercase text-slate-400 block mb-1">Nom Utilisateur</label>
-                                                <input value={manualAddName} onChange={e => setManualAddName(e.target.value)} className="w-full p-3 border rounded-xl text-sm" placeholder="Ex: Jean Dupont" />
-                                            </div>
-                                            <div className="flex items-end">
-                                                <button onClick={handleManualAddDevice} className="bg-green-600 text-white px-6 py-3 rounded-xl font-bold text-sm hover:bg-green-700 w-full md:w-auto">Valider</button>
-                                            </div>
-                                        </div>
+                                        )}
                                     </div>
 
                                     <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 opacity-80">
